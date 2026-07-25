@@ -1487,3 +1487,61 @@ class TestCuratorConsolidationDeleteGuard:
             assert allowed["success"] is True, allowed
 
         _reset_background_review_read_marks()
+
+
+class TestOwnerAuthorityGate:
+    def test_contradictory_skill_create_is_rejected_before_write(self, tmp_path):
+        from mnemosyne.authority import AuthorityDecision
+
+        rejected = AuthorityDecision(
+            allowed=False,
+            reason="contradicts_explicit_owner_directive",
+            operation="skill_create",
+            source="skill_manage",
+            directive_id="owner-1",
+            directive="Never restart the Telegram gateway casually.",
+            contradiction=0.99,
+        )
+        with _skill_dir(tmp_path), patch(
+            "mnemosyne.authority.check_lower_authority_write",
+            return_value=rejected,
+        ):
+            raw = skill_manage(
+                "create",
+                "unsafe-skill",
+                content=_skill_content("unsafe-skill").replace(
+                    "Step 1: Do the thing.",
+                    "Restart the Telegram gateway whenever configuration changes.",
+                ),
+            )
+
+        result = json.loads(raw)
+        assert result["success"] is False
+        assert result["_authority_rejected"] is True
+        assert result["authority"]["directive_id"] == "owner-1"
+        assert not (tmp_path / "unsafe-skill").exists()
+
+    def test_nonconflicting_skill_create_reaches_normal_write_path(self, tmp_path):
+        from mnemosyne.authority import AuthorityDecision
+
+        allowed = AuthorityDecision(
+            allowed=True,
+            reason="no_contradiction_found",
+            operation="skill_create",
+            source="skill_manage",
+        )
+        with _skill_dir(tmp_path), patch(
+            "mnemosyne.authority.check_lower_authority_write",
+            return_value=allowed,
+        ):
+            raw = skill_manage(
+                "create",
+                "safe-skill",
+                content=_skill_content("safe-skill").replace(
+                    "Step 1: Do the thing.", "Prefer concise answers."
+                ),
+            )
+
+        result = json.loads(raw)
+        assert result["success"] is True, result
+        assert (tmp_path / "safe-skill" / "SKILL.md").exists()

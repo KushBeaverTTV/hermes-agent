@@ -1351,6 +1351,73 @@ def _apply_skill_write_gate(action, name, **payload_kwargs):
     )
 
 
+def _skill_authority_candidate(
+    action: str,
+    name: str,
+    *,
+    content: Optional[str] = None,
+    file_path: Optional[str] = None,
+    file_content: Optional[str] = None,
+    old_string: Optional[str] = None,
+    new_string: Optional[str] = None,
+) -> str:
+    """Describe the effective guidance mutation for the shared authority gate."""
+    if action in {"create", "edit"}:
+        return content or ""
+    if action == "patch":
+        if new_string:
+            return new_string
+        return f"Stop following and remove this guidance: {old_string or ''}"
+    if action == "write_file":
+        return file_content or ""
+
+    existing = _find_skill(name)
+    if not existing:
+        return ""
+    target = existing["path"] / "SKILL.md"
+    if action == "remove_file" and file_path:
+        resolved, error = _resolve_skill_target(existing["path"], file_path)
+        if not error and resolved is not None:
+            target = resolved
+    try:
+        existing_text = target.read_text(encoding="utf-8")
+    except Exception:
+        existing_text = f"skill {name} guidance"
+    return f"Stop following and remove this guidance: {existing_text}"
+
+
+def _apply_owner_authority_gate(action: str, name: str, **payload_kwargs):
+    """Reject lower-authority skill mutations that contradict owner directives."""
+    if action not in {"create", "edit", "patch", "delete", "write_file", "remove_file"}:
+        return None
+    candidate = _skill_authority_candidate(action, name, **payload_kwargs)
+    if not candidate.strip():
+        return None
+    from mnemosyne.authority import check_lower_authority_write
+
+    try:
+        from tools.write_approval import current_origin
+        source = current_origin()
+    except Exception:
+        source = "skill_manage"
+    decision = check_lower_authority_write(
+        candidate,
+        operation=f"skill_{action}",
+        source=str(source or "skill_manage"),
+    )
+    if decision.allowed:
+        return None
+    return json.dumps(
+        {
+            "success": False,
+            "error": "Skill mutation rejected: it contradicts a newer explicit owner directive.",
+            "_authority_rejected": True,
+            "authority": decision.to_dict(),
+        },
+        ensure_ascii=False,
+    )
+
+
 def apply_skill_pending(payload: Dict[str, Any]) -> str:
     """Replay a staged skill write, bypassing the gate. Returns the tool result
     JSON string. Called by the /skills approve handler.
@@ -1393,6 +1460,18 @@ def skill_manage(
     preflight = _background_review_preflight(action, name)
     if preflight is not None:
         return json.dumps(preflight, ensure_ascii=False)
+
+    authority_result = _apply_owner_authority_gate(
+        action,
+        name,
+        content=content,
+        file_path=file_path,
+        file_content=file_content,
+        old_string=old_string,
+        new_string=new_string,
+    )
+    if authority_result is not None:
+        return authority_result
 
     # Approval gate: when on, stages the write for review (skills are too large
     # to review inline, so they always stage regardless of origin); when off
