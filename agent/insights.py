@@ -20,7 +20,7 @@ import json
 import sqlite3
 import time
 from collections import Counter, defaultdict
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from agent.usage_pricing import (
@@ -80,6 +80,32 @@ def _bar_chart(values: List[int], max_width: int = 20) -> List[str]:
     if peak == 0:
         return ["" for _ in values]
     return ["█" * max(1, int(v / peak * max_width)) if v > 0 else "" for v in values]
+
+
+def _coerce_timestamp(value: Any) -> Optional[float]:
+    """Normalize legacy numeric and ISO timestamp representations."""
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        return float(text)
+    except ValueError:
+        pass
+
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.timestamp()
 
 
 class InsightsEngine:
@@ -455,16 +481,20 @@ class InsightsEngine:
         # Session duration stats (guard against negative durations from clock drift)
         durations = []
         for s in sessions:
-            start = s.get("started_at")
-            end = s.get("ended_at")
-            if start and end and end > start:
+            start = _coerce_timestamp(s.get("started_at"))
+            end = _coerce_timestamp(s.get("ended_at"))
+            if start is not None and end is not None and end > start:
                 durations.append(end - start)
 
         total_hours = sum(durations) / 3600 if durations else 0
         avg_duration = sum(durations) / len(durations) if durations else 0
 
         # Earliest and latest session
-        started_timestamps = [s["started_at"] for s in sessions if s.get("started_at")]
+        started_timestamps = [
+            timestamp
+            for s in sessions
+            if (timestamp := _coerce_timestamp(s.get("started_at"))) is not None
+        ]
         date_range_start = min(started_timestamps) if started_timestamps else None
         date_range_end = max(started_timestamps) if started_timestamps else None
 
@@ -827,22 +857,24 @@ class InsightsEngine:
         """Find notable sessions (longest, most messages, most tokens)."""
         top = []
 
+        def session_date(session: Dict) -> str:
+            timestamp = _coerce_timestamp(session.get("started_at"))
+            return datetime.fromtimestamp(timestamp).strftime("%b %d") if timestamp is not None else "?"
+
         # Longest by duration
-        sessions_with_duration = [
-            s for s in sessions
-            if s.get("started_at") and s.get("ended_at")
-        ]
+        sessions_with_duration = []
+        for session in sessions:
+            start = _coerce_timestamp(session.get("started_at"))
+            end = _coerce_timestamp(session.get("ended_at"))
+            if start is not None and end is not None and end > start:
+                sessions_with_duration.append((end - start, start, session))
         if sessions_with_duration:
-            longest = max(
-                sessions_with_duration,
-                key=lambda s: (s["ended_at"] - s["started_at"]),
-            )
-            dur = longest["ended_at"] - longest["started_at"]
+            dur, started_at, longest = max(sessions_with_duration, key=lambda item: item[0])
             top.append({
                 "label": "Longest session",
                 "session_id": longest["id"][:16],
                 "value": format_duration_compact(dur),
-                "date": datetime.fromtimestamp(longest["started_at"]).strftime("%b %d"),
+                "date": datetime.fromtimestamp(started_at).strftime("%b %d"),
             })
 
         # Most messages
@@ -852,7 +884,7 @@ class InsightsEngine:
                 "label": "Most messages",
                 "session_id": most_msgs["id"][:16],
                 "value": f"{most_msgs['message_count']} msgs",
-                "date": datetime.fromtimestamp(most_msgs["started_at"]).strftime("%b %d") if most_msgs.get("started_at") else "?",
+                "date": session_date(most_msgs),
             })
 
         # Most tokens
@@ -866,7 +898,7 @@ class InsightsEngine:
                 "label": "Most tokens",
                 "session_id": most_tokens["id"][:16],
                 "value": f"{token_total:,} tokens",
-                "date": datetime.fromtimestamp(most_tokens["started_at"]).strftime("%b %d") if most_tokens.get("started_at") else "?",
+                "date": session_date(most_tokens),
             })
 
         # Most tool calls
@@ -876,7 +908,7 @@ class InsightsEngine:
                 "label": "Most tool calls",
                 "session_id": most_tools["id"][:16],
                 "value": f"{most_tools['tool_call_count']} calls",
-                "date": datetime.fromtimestamp(most_tools["started_at"]).strftime("%b %d") if most_tools.get("started_at") else "?",
+                "date": session_date(most_tools),
             })
 
         return top
