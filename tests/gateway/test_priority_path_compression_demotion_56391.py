@@ -32,22 +32,32 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from gateway.config import GatewayConfig, Platform, PlatformConfig
-from gateway.platforms.base import MessageEvent
+from gateway.platforms.base import MessageEvent, MessageType
 from gateway.session import SessionEntry, SessionSource, build_session_key
 
 
-def _make_source() -> SessionSource:
+def _make_source(*, user_id: str = "u1", user_id_alt: str | None = None) -> SessionSource:
     return SessionSource(
         platform=Platform.TELEGRAM,
-        user_id="u1",
+        user_id=user_id,
+        user_id_alt=user_id_alt,
         chat_id="c1",
         user_name="tester",
         chat_type="dm",
     )
 
 
-def _make_event(text: str) -> MessageEvent:
-    return MessageEvent(text=text, source=_make_source(), message_id="m1")
+def _make_event(
+    text: str,
+    *,
+    user_id: str = "u1",
+    user_id_alt: str | None = None,
+) -> MessageEvent:
+    return MessageEvent(
+        text=text,
+        source=_make_source(user_id=user_id, user_id_alt=user_id_alt),
+        message_id="m1",
+    )
 
 
 def _make_runner(*, compression_in_flight: bool):
@@ -156,3 +166,153 @@ async def test_priority_path_still_interrupts_without_compression_lock():
     await runner._handle_message(_make_event("still there?"))
 
     agent_mock.interrupt.assert_called_once_with("still there?")
+
+
+@pytest.mark.asyncio
+async def test_exact_owner_priority_path_bypasses_steer_and_queues_next_turn(
+    monkeypatch,
+):
+    """Owner text is a new turn, never an injection into stale work."""
+    monkeypatch.setattr(
+        "gateway.authz_mixin._auth_env",
+        lambda name, default="": "u1" if name == "TELEGRAM_ALLOWED_USERS" else default,
+    )
+    runner, agent_mock, sk = _make_runner(compression_in_flight=False)
+    runner._busy_input_mode = "steer"
+    agent_mock.steer.return_value = True
+
+    await runner._handle_message(_make_event("new owner direction"))
+
+    agent_mock.steer.assert_not_called()
+    agent_mock.interrupt.assert_called_once_with("new owner direction")
+    queued = runner.adapters[Platform.TELEGRAM]._pending_messages.get(sk)
+    assert queued is not None and queued.text == "new owner direction"
+
+
+@pytest.mark.asyncio
+async def test_exact_owner_priority_path_bypasses_subagent_and_compression_demotion(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        "gateway.authz_mixin._auth_env",
+        lambda name, default="": "u1" if name == "TELEGRAM_ALLOWED_USERS" else default,
+    )
+    runner, agent_mock, sk = _make_runner(compression_in_flight=True)
+    runner._agent_has_active_subagents = lambda running_agent: True
+
+    await runner._handle_message(_make_event("supersede the stale batch"))
+
+    agent_mock.interrupt.assert_called_once_with("supersede the stale batch")
+    queued = runner.adapters[Platform.TELEGRAM]._pending_messages.get(sk)
+    assert queued is not None and queued.text == "supersede the stale batch"
+
+
+@pytest.mark.asyncio
+async def test_exact_owner_priority_path_bypasses_telegram_grace_and_queue_mode(
+    monkeypatch,
+):
+    import time
+
+    monkeypatch.setattr(
+        "gateway.authz_mixin._auth_env",
+        lambda name, default="": "u1" if name == "TELEGRAM_ALLOWED_USERS" else default,
+    )
+    runner, agent_mock, sk = _make_runner(compression_in_flight=False)
+    runner._busy_input_mode = "queue"
+    runner._running_agents_ts[sk] = time.time()
+
+    await runner._handle_message(_make_event("owner now"))
+
+    agent_mock.interrupt.assert_called_once_with("owner now")
+    queued = runner.adapters[Platform.TELEGRAM]._pending_messages.get(sk)
+    assert queued is not None and queued.text == "owner now"
+
+
+@pytest.mark.asyncio
+async def test_exact_owner_priority_path_preempts_existing_fifo_head(monkeypatch):
+    monkeypatch.setattr(
+        "gateway.authz_mixin._auth_env",
+        lambda name, default="": "u1" if name == "TELEGRAM_ALLOWED_USERS" else default,
+    )
+    runner, agent_mock, sk = _make_runner(compression_in_flight=False)
+    adapter = runner.adapters[Platform.TELEGRAM]
+    stale_head = _make_event("stale head")
+    stale_tail = _make_event("stale tail")
+    adapter._pending_messages[sk] = stale_head
+    runner._queued_events = {sk: [stale_tail]}
+
+    owner_event = _make_event("owner is next")
+    await runner._handle_message(owner_event)
+
+    assert adapter._pending_messages[sk] is owner_event
+    assert runner._queued_events[sk] == [stale_head, stale_tail]
+    agent_mock.interrupt.assert_called_once_with(owner_event.text)
+
+
+@pytest.mark.asyncio
+async def test_exact_owner_preempts_full_media_queue_while_agent_is_starting(
+    monkeypatch,
+):
+    from gateway.run import _AGENT_PENDING_SENTINEL
+
+    monkeypatch.setattr(
+        "gateway.authz_mixin._auth_env",
+        lambda name, default="": "u1" if name == "TELEGRAM_ALLOWED_USERS" else default,
+    )
+    runner, agent_mock, sk = _make_runner(compression_in_flight=False)
+    adapter = runner.adapters[Platform.TELEGRAM]
+    stale_media = _make_event("stale media")
+    stale_media.message_type = MessageType.PHOTO
+    stale_media.media_urls = ["https://example.invalid/stale.jpg"]
+    stale_overflow = [_make_event(f"stale-{index}") for index in range(31)]
+    adapter._pending_messages[sk] = stale_media
+    runner._queued_events = {sk: list(stale_overflow)}
+    runner._running_agents[sk] = _AGENT_PENDING_SENTINEL
+
+    owner_event = _make_event("owner is next")
+    await runner._handle_message(owner_event)
+
+    assert adapter._pending_messages[sk] is owner_event
+    assert runner._queued_events[sk][0] is stale_media
+    assert runner._queued_events[sk][1:] == stale_overflow[:30]
+    assert len(runner._queued_events[sk]) == 31
+    assert stale_overflow[-1] not in runner._queued_events[sk]
+    agent_mock.interrupt.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_internal_event_cannot_gain_priority_owner_authority(monkeypatch):
+    monkeypatch.setattr(
+        "gateway.authz_mixin._auth_env",
+        lambda name, default="": "u1" if name == "TELEGRAM_ALLOWED_USERS" else default,
+    )
+    runner, agent_mock, _sk = _make_runner(compression_in_flight=False)
+    runner._busy_input_mode = "steer"
+    agent_mock.steer.return_value = True
+    internal_event = _make_event("internal follow-up")
+    internal_event.internal = True
+
+    await runner._handle_message(internal_event)
+
+    agent_mock.interrupt.assert_not_called()
+    agent_mock.steer.assert_called_once_with(internal_event.text)
+
+
+@pytest.mark.asyncio
+async def test_alternate_id_only_cannot_gain_priority_owner_authority(monkeypatch):
+    monkeypatch.setattr(
+        "gateway.authz_mixin._auth_env",
+        lambda name, default="": "owner-alt"
+        if name == "TELEGRAM_ALLOWED_USERS"
+        else default,
+    )
+    runner, agent_mock, _sk = _make_runner(compression_in_flight=False)
+    runner._busy_input_mode = "steer"
+    agent_mock.steer.return_value = True
+
+    await runner._handle_message(
+        _make_event("ordinary follow-up", user_id="paired-primary", user_id_alt="owner-alt")
+    )
+
+    agent_mock.interrupt.assert_not_called()
+    agent_mock.steer.assert_called_once_with("ordinary follow-up")
