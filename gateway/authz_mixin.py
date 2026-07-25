@@ -344,6 +344,29 @@ class GatewayAuthorizationMixin:
             return per_profile[profile]
         return getattr(self, "pairing_store", None)
 
+    def _is_explicit_owner_source(self, source: SessionSource) -> bool:
+        """Return whether *source* is an exact platform-allowlist owner.
+
+        This is deliberately narrower than ``_is_user_authorized``. Pairing,
+        roles, chat allowlists, and allow-all flags grant conversation access;
+        they do not grant control-plane authority over an active agent turn.
+        User-controlled display labels are never considered.
+        """
+        if source is None or getattr(source, "is_bot", False) is True:
+            return False
+        platform = getattr(getattr(source, "platform", None), "value", None)
+        if not platform:
+            return False
+        try:
+            from gateway.pairing import _allowlist_env_for_platform
+
+            env_name = _allowlist_env_for_platform(str(platform))
+        except Exception:
+            return False
+        allowed = _coerce_allow_set(_auth_env(env_name or "")) - {"*"}
+        user_id = str(getattr(source, "user_id", None) or "").strip()
+        return bool(user_id and user_id in allowed)
+
     def _is_user_authorized(self, source: SessionSource) -> bool:
         """
         Check if a user is authorized to use the bot.

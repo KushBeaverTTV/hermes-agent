@@ -323,22 +323,21 @@ class TestBusyHandlerDemotesInterruptForSubagents:
         parent.interrupt.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_explicit_owner_supersedes_steer_and_active_subagents(
+    async def test_exact_allowlist_owner_supersedes_steer_and_subagent_demotion(
         self, monkeypatch
     ) -> None:
-        """An authenticated owner correction is a control-plane event."""
-        from agent import owner_directive_capture as owner_capture
-
+        """Authenticated owner text is the next real turn, never a stale steer."""
         monkeypatch.setattr(
-            owner_capture,
-            "_get_secret",
-            lambda name: "user1" if name == "TELEGRAM_ALLOWED_USERS" else "",
+            "gateway.authz_mixin._auth_env",
+            lambda name, default="": "user1"
+            if name == "TELEGRAM_ALLOWED_USERS"
+            else default,
         )
         runner = _make_runner()
         runner._busy_input_mode = "steer"
-        runner._busy_text_mode = "interrupt"
+        runner._busy_text_mode = "queue"
         adapter = _make_adapter()
-        event = _make_event(text="stop the stale work and answer this")
+        event = _make_event(text="stop stale work and answer this")
         sk = build_session_key(event.source)
         parent = _make_parent_with_subagents()
         parent.steer = MagicMock(return_value=True)
@@ -351,6 +350,70 @@ class TestBusyHandlerDemotesInterruptForSubagents:
         parent.steer.assert_not_called()
         parent.redirect.assert_not_called()
         parent.interrupt.assert_called_once_with(event.text)
+        assert adapter._pending_messages.get(sk) is event
+
+    @pytest.mark.asyncio
+    async def test_exact_owner_preempts_full_media_queue_as_standalone_head(
+        self, monkeypatch
+    ) -> None:
+        monkeypatch.setattr(
+            "gateway.authz_mixin._auth_env",
+            lambda name, default="": "user1"
+            if name == "TELEGRAM_ALLOWED_USERS"
+            else default,
+        )
+        runner = _make_runner()
+        runner._busy_input_mode = "queue"
+        adapter = _make_adapter()
+        owner_event = _make_event(text="answer this now")
+        sk = build_session_key(owner_event.source)
+        stale_media = _make_event(text="stale media")
+        stale_media.message_type = MessageType.PHOTO
+        stale_media.media_urls = ["https://example.invalid/stale.jpg"]
+        stale_overflow = [_make_event(text=f"stale-{index}") for index in range(31)]
+        adapter._pending_messages[sk] = stale_media
+        runner._queued_events = {sk: list(stale_overflow)}
+        parent = _make_parent_with_subagents()
+        runner._running_agents[sk] = parent
+        runner.adapters[owner_event.source.platform] = adapter
+
+        handled = await runner._handle_active_session_busy_message(owner_event, sk)
+
+        assert handled is True
+        assert adapter._pending_messages[sk] is owner_event
+        assert runner._queued_events[sk][0] is stale_media
+        assert runner._queued_events[sk][1:] == stale_overflow[:30]
+        assert len(runner._queued_events[sk]) == 31
+        assert stale_overflow[-1] not in runner._queued_events[sk]
+        parent.interrupt.assert_called_once_with(owner_event.text)
+
+    @pytest.mark.asyncio
+    async def test_allow_all_guest_remains_queued_behind_active_subagent(
+        self, monkeypatch
+    ) -> None:
+        """Broad chat permission is not owner control-plane authority."""
+        monkeypatch.setattr(
+            "gateway.authz_mixin._auth_env",
+            lambda name, default="": "true"
+            if name == "DISCORD_ALLOW_ALL_USERS"
+            else default,
+        )
+        runner = _make_runner()
+        runner._busy_input_mode = "interrupt"
+        adapter = _make_adapter()
+        event = _make_event(text="guest follow-up")
+        event.source.platform = MagicMock(value="discord")
+        event.source.user_id = "guest"
+        event.source.user_name = "Kush Beaver"
+        sk = build_session_key(event.source)
+        parent = _make_parent_with_subagents()
+        runner._running_agents[sk] = parent
+        runner.adapters[event.source.platform] = adapter
+
+        handled = await runner._handle_active_session_busy_message(event, sk)
+
+        assert handled is True
+        parent.interrupt.assert_not_called()
         assert adapter._pending_messages.get(sk) is event
 
     @pytest.mark.asyncio
@@ -377,3 +440,37 @@ class TestBusyHandlerDemotesInterruptForSubagents:
         # handler just skips the interrupt call silently).
         content = adapter._send_with_retry.call_args.kwargs.get("content", "")
         assert "Subagent working" not in content
+
+
+class TestExplicitOwnerSource:
+    def test_matches_exact_primary_user_id_but_not_alt_only(self, monkeypatch) -> None:
+        monkeypatch.setattr(
+            "gateway.authz_mixin._auth_env",
+            lambda name, default="": "owner-primary,owner-alt"
+            if name == "TELEGRAM_ALLOWED_USERS"
+            else default,
+        )
+        runner = _make_runner()
+        source = _make_event().source
+
+        source.user_id = "owner-primary"
+        assert runner._is_explicit_owner_source(source) is True
+
+        source.user_id = "other"
+        source.user_id_alt = "owner-alt"
+        assert runner._is_explicit_owner_source(source) is False
+
+    def test_rejects_wildcard_and_user_controlled_labels(self, monkeypatch) -> None:
+        monkeypatch.setattr(
+            "gateway.authz_mixin._auth_env",
+            lambda name, default="": "*"
+            if name == "TELEGRAM_ALLOWED_USERS"
+            else default,
+        )
+        runner = _make_runner()
+        source = _make_event().source
+        source.user_id = "guest"
+        source.user_name = "owner-primary"
+        source.chat_name = "Owner room"
+
+        assert runner._is_explicit_owner_source(source) is False
