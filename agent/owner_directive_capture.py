@@ -38,23 +38,39 @@ def _allowset(raw: Any) -> set[str]:
     return {item.strip() for item in str(raw or "").split(",") if item.strip()}
 
 
+def is_explicit_owner_source(source: Any) -> bool:
+    """Return whether a gateway source is the allowlisted platform owner.
+
+    Authorization and ownership are deliberately different: allow-all guests
+    and paired users may chat, but only an identity present in the platform's
+    explicit allowlist may supersede active owner work.
+    """
+    platform = _platform_name(getattr(source, "platform", ""))
+    env_name = _ALLOWED_ENV.get(platform)
+    if not env_name:
+        return False
+    allowed = _allowset(_get_secret(env_name))
+    identities = {
+        str(getattr(source, "user_id", "") or "").strip(),
+        str(getattr(source, "user_id_alt", "") or "").strip(),
+    }
+    identities.discard("")
+    return bool(allowed & identities)
+
+
 def _is_explicit_owner(agent: Any) -> bool:
     platform = _platform_name(getattr(agent, "platform", ""))
     if platform == "cli":
         # Interactive CLI is a direct owner surface. Quiet CLI instances are
         # cron/background/subagent jobs and must never author owner directives.
         return not bool(getattr(agent, "quiet_mode", False))
-    env_name = _ALLOWED_ENV.get(platform)
-    if not env_name:
-        return False
-    allowed = _allowset(_get_secret(env_name))
-    identities = {
-        str(getattr(agent, "_user_id", "") or "").strip(),
-        str(getattr(agent, "_user_id_alt", "") or "").strip(),
-    }
-    identities.discard("")
+    source = type("OwnerSource", (), {
+        "platform": platform,
+        "user_id": getattr(agent, "_user_id", None),
+        "user_id_alt": getattr(agent, "_user_id_alt", None),
+    })()
     # Deliberately ignore *_ALLOW_ALL_USERS: authorized guests are not owners.
-    return bool(allowed & identities)
+    return is_explicit_owner_source(source)
 
 
 def _text_content(message: Any) -> str:

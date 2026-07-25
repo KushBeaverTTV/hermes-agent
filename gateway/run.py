@@ -6223,12 +6223,39 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
         running_agent = self._running_agents.get(session_key)
 
+        # Authenticated owner text is a control-plane supersession, not a
+        # conversational steer. It must become the next real user turn and
+        # terminate stale parent/tool/child work. Never let configured steer,
+        # queue mode, subagent protection, or compression protection outrank
+        # the explicit platform owner.
+        owner_supersedes = False
+        if (
+            event.message_type == MessageType.TEXT
+            and bool((event.text or "").strip())
+            and not event.media_urls
+            and not event.media_types
+        ):
+            try:
+                from agent.owner_directive_capture import is_explicit_owner_source
+
+                owner_supersedes = is_explicit_owner_source(event.source)
+            except Exception:
+                logger.warning(
+                    "Explicit-owner busy-turn check failed for session %s; "
+                    "falling back to normal busy policy",
+                    session_key,
+                    exc_info=True,
+                )
+
         effective_mode = self._busy_input_mode
+        if owner_supersedes:
+            effective_mode = "interrupt"
         busy_text_mode = getattr(self, "_busy_text_mode", "interrupt")
         if (
             event.message_type == MessageType.TEXT
             and busy_text_mode == "queue"
             and effective_mode != "steer"
+            and not owner_supersedes
         ):
             return False
 
@@ -6246,6 +6273,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # operator still has a way to force-cancel everything.
         demoted_for_subagents = (
             effective_mode == "interrupt"
+            and not owner_supersedes
             and self._agent_has_active_subagents(running_agent)
         )
         if demoted_for_subagents:
@@ -6257,6 +6285,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             effective_mode = "queue"
         demoted_for_compression = (
             effective_mode == "interrupt"
+            and not owner_supersedes
             and await self._session_has_compression_in_flight(session_key)
         )
         if demoted_for_compression:
@@ -6290,6 +6319,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 effective_mode = "queue"
         elif (
             effective_mode == "interrupt"
+            and not owner_supersedes
             and event.message_type == MessageType.TEXT
             and not event.media_urls
             and not event.media_types

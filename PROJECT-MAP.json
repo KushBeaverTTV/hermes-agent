@@ -16,6 +16,7 @@
   "excluded_doc_roots": [
     ".github",
     ".plans",
+    ".pytest_cache",
     "apps",
     "contributors",
     "docker",
@@ -63,7 +64,9 @@
     "tools/skill_manager_tool.py",
     "PROJECT-MAP.json"
   ],
-  "reusable_script_roots": [],
+  "reusable_script_roots": [
+    "scripts/aurora-authority-regression.sh"
+  ],
   "forbidden_active_doc_patterns": [],
   "path_reference_exceptions": [],
   "doc_path_bases": {}

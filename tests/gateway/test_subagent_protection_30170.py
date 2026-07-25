@@ -323,6 +323,37 @@ class TestBusyHandlerDemotesInterruptForSubagents:
         parent.interrupt.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_explicit_owner_supersedes_steer_and_active_subagents(
+        self, monkeypatch
+    ) -> None:
+        """An authenticated owner correction is a control-plane event."""
+        from agent import owner_directive_capture as owner_capture
+
+        monkeypatch.setattr(
+            owner_capture,
+            "_get_secret",
+            lambda name: "user1" if name == "TELEGRAM_ALLOWED_USERS" else "",
+        )
+        runner = _make_runner()
+        runner._busy_input_mode = "steer"
+        runner._busy_text_mode = "interrupt"
+        adapter = _make_adapter()
+        event = _make_event(text="stop the stale work and answer this")
+        sk = build_session_key(event.source)
+        parent = _make_parent_with_subagents()
+        parent.steer = MagicMock(return_value=True)
+        runner._running_agents[sk] = parent
+        runner.adapters[event.source.platform] = adapter
+
+        handled = await runner._handle_active_session_busy_message(event, sk)
+
+        assert handled is True
+        parent.steer.assert_not_called()
+        parent.redirect.assert_not_called()
+        parent.interrupt.assert_called_once_with(event.text)
+        assert adapter._pending_messages.get(sk) is event
+
+    @pytest.mark.asyncio
     async def test_pending_sentinel_does_not_demote(self) -> None:
         """The placeholder ``_AGENT_PENDING_SENTINEL`` is not a real
         agent — the guard must not treat it as having subagents.

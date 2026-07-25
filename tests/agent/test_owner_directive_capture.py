@@ -110,3 +110,29 @@ def test_owner_authority_prompt_is_hidden_from_messaging_guest(monkeypatch):
 
     assert prompt == ""
     assert called == []
+
+
+def test_allowlisted_gateway_source_is_explicit_owner(monkeypatch):
+    monkeypatch.setattr(
+        capture,
+        "_get_secret",
+        lambda name: "8682886781" if name == "TELEGRAM_ALLOWED_USERS" else "",
+    )
+    source = SimpleNamespace(
+        platform="telegram",
+        user_id="8682886781",
+        user_id_alt=None,
+    )
+
+    assert capture.is_explicit_owner_source(source) is True
+
+
+def test_allow_all_gateway_guest_is_not_explicit_owner(monkeypatch):
+    monkeypatch.setattr(capture, "_get_secret", lambda _name: "")
+    source = SimpleNamespace(
+        platform="discord",
+        user_id="guest-user",
+        user_id_alt=None,
+    )
+
+    assert capture.is_explicit_owner_source(source) is False
