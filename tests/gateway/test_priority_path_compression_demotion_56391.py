@@ -144,6 +144,10 @@ def _make_runner(*, compression_in_flight: bool):
     return runner, agent_mock, sk
 
 
+def _set_owner_ids(runner, *user_ids: str) -> None:
+    runner.config.platforms[Platform.TELEGRAM].extra["owner_user_ids"] = list(user_ids)
+
+
 @pytest.mark.asyncio
 async def test_priority_path_does_not_interrupt_when_compression_in_flight():
     """A plain-text follow-up must NOT interrupt the running agent while
@@ -174,11 +178,8 @@ async def test_exact_owner_priority_path_bypasses_steer_and_queues_next_turn(
     monkeypatch,
 ):
     """Owner text is a new turn, never an injection into stale work."""
-    monkeypatch.setattr(
-        "gateway.authz_mixin._auth_env",
-        lambda name, default="": "u1" if name == "TELEGRAM_OWNER_USER_IDS" else default,
-    )
     runner, agent_mock, sk = _make_runner(compression_in_flight=False)
+    _set_owner_ids(runner, "u1")
     runner._busy_input_mode = "steer"
     agent_mock.steer.return_value = True
 
@@ -194,11 +195,8 @@ async def test_exact_owner_priority_path_bypasses_steer_and_queues_next_turn(
 async def test_exact_owner_priority_path_bypasses_subagent_and_compression_demotion(
     monkeypatch,
 ):
-    monkeypatch.setattr(
-        "gateway.authz_mixin._auth_env",
-        lambda name, default="": "u1" if name == "TELEGRAM_OWNER_USER_IDS" else default,
-    )
     runner, agent_mock, sk = _make_runner(compression_in_flight=True)
+    _set_owner_ids(runner, "u1")
     runner._agent_has_active_subagents = lambda running_agent: True
 
     await runner._handle_message(_make_event("supersede the stale batch"))
@@ -214,11 +212,8 @@ async def test_exact_owner_priority_path_bypasses_telegram_grace_and_queue_mode(
 ):
     import time
 
-    monkeypatch.setattr(
-        "gateway.authz_mixin._auth_env",
-        lambda name, default="": "u1" if name == "TELEGRAM_OWNER_USER_IDS" else default,
-    )
     runner, agent_mock, sk = _make_runner(compression_in_flight=False)
+    _set_owner_ids(runner, "u1")
     runner._busy_input_mode = "queue"
     runner._running_agents_ts[sk] = time.time()
 
@@ -231,11 +226,8 @@ async def test_exact_owner_priority_path_bypasses_telegram_grace_and_queue_mode(
 
 @pytest.mark.asyncio
 async def test_exact_owner_priority_path_preempts_existing_fifo_head(monkeypatch):
-    monkeypatch.setattr(
-        "gateway.authz_mixin._auth_env",
-        lambda name, default="": "u1" if name == "TELEGRAM_OWNER_USER_IDS" else default,
-    )
     runner, agent_mock, sk = _make_runner(compression_in_flight=False)
+    _set_owner_ids(runner, "u1")
     adapter = runner.adapters[Platform.TELEGRAM]
     stale_head = _make_event("stale head")
     stale_tail = _make_event("stale tail")
@@ -256,11 +248,8 @@ async def test_exact_owner_preempts_full_media_queue_while_agent_is_starting(
 ):
     from gateway.run import _AGENT_PENDING_SENTINEL
 
-    monkeypatch.setattr(
-        "gateway.authz_mixin._auth_env",
-        lambda name, default="": "u1" if name == "TELEGRAM_OWNER_USER_IDS" else default,
-    )
     runner, agent_mock, sk = _make_runner(compression_in_flight=False)
+    _set_owner_ids(runner, "u1")
     adapter = runner.adapters[Platform.TELEGRAM]
     stale_media = _make_event("stale media")
     stale_media.message_type = MessageType.PHOTO
@@ -285,11 +274,8 @@ async def test_exact_owner_preempts_full_media_queue_while_agent_is_starting(
 async def test_exact_owner_preempts_full_media_queue_during_direct_drain(
     monkeypatch,
 ):
-    monkeypatch.setattr(
-        "gateway.authz_mixin._auth_env",
-        lambda name, default="": "u1" if name == "TELEGRAM_OWNER_USER_IDS" else default,
-    )
     runner, agent_mock, sk = _make_runner(compression_in_flight=False)
+    _set_owner_ids(runner, "u1")
     adapter = runner.adapters[Platform.TELEGRAM]
     stale_media = _make_event("stale media")
     stale_media.message_type = MessageType.PHOTO
@@ -316,11 +302,8 @@ async def test_exact_owner_preempts_full_media_queue_during_direct_drain(
 async def test_exact_owner_preempts_full_media_queue_during_adapter_drain(
     monkeypatch,
 ):
-    monkeypatch.setattr(
-        "gateway.authz_mixin._auth_env",
-        lambda name, default="": "u1" if name == "TELEGRAM_OWNER_USER_IDS" else default,
-    )
     runner, agent_mock, sk = _make_runner(compression_in_flight=False)
+    _set_owner_ids(runner, "u1")
     adapter = runner.adapters[Platform.TELEGRAM]
     adapter._send_with_retry = AsyncMock()
     stale_media = _make_event("stale media")
@@ -355,11 +338,8 @@ async def test_drain_disabled_rejects_owner_even_during_startup_sentinel(
 ):
     from gateway.run import _AGENT_PENDING_SENTINEL
 
-    monkeypatch.setattr(
-        "gateway.authz_mixin._auth_env",
-        lambda name, default="": "u1" if name == "TELEGRAM_OWNER_USER_IDS" else default,
-    )
     runner, agent_mock, sk = _make_runner(compression_in_flight=False)
+    _set_owner_ids(runner, "u1")
     adapter = runner.adapters[Platform.TELEGRAM]
     stale_head = _make_event("stale head")
     adapter._pending_messages[sk] = stale_head
@@ -379,11 +359,8 @@ async def test_drain_disabled_rejects_owner_even_during_startup_sentinel(
 
 @pytest.mark.asyncio
 async def test_internal_event_cannot_gain_priority_owner_authority(monkeypatch):
-    monkeypatch.setattr(
-        "gateway.authz_mixin._auth_env",
-        lambda name, default="": "u1" if name == "TELEGRAM_OWNER_USER_IDS" else default,
-    )
     runner, agent_mock, _sk = _make_runner(compression_in_flight=False)
+    _set_owner_ids(runner, "u1")
     runner._busy_input_mode = "steer"
     agent_mock.steer.return_value = True
     internal_event = _make_event("internal follow-up")
@@ -404,7 +381,7 @@ def test_real_pairing_approval_cannot_gain_priority_owner_authority(
 
     monkeypatch.setattr(pairing_mod, "PAIRING_DIR", tmp_path / "pairing")
     monkeypatch.setenv("TELEGRAM_ALLOWED_USERS", "u1")
-    monkeypatch.setenv("TELEGRAM_OWNER_USER_IDS", "u1")
+
     monkeypatch.setattr(
         config_mod,
         "save_env_value",
@@ -415,9 +392,9 @@ def test_real_pairing_approval_cannot_gain_priority_owner_authority(
     assert code is not None
     assert store.approve_code("telegram", code) is not None
     assert "paired-guest" in os.environ["TELEGRAM_ALLOWED_USERS"].split(",")
-    assert "paired-guest" not in os.environ["TELEGRAM_OWNER_USER_IDS"].split(",")
 
     runner, _agent_mock, _sk = _make_runner(compression_in_flight=False)
+    _set_owner_ids(runner, "u1")
     runner.pairing_store = store
     runner.pairing_stores = {}
 
@@ -428,13 +405,8 @@ def test_real_pairing_approval_cannot_gain_priority_owner_authority(
 
 @pytest.mark.asyncio
 async def test_alternate_id_only_cannot_gain_priority_owner_authority(monkeypatch):
-    monkeypatch.setattr(
-        "gateway.authz_mixin._auth_env",
-        lambda name, default="": "owner-alt"
-        if name == "TELEGRAM_OWNER_USER_IDS"
-        else default,
-    )
     runner, agent_mock, _sk = _make_runner(compression_in_flight=False)
+    _set_owner_ids(runner, "owner-alt")
     runner._busy_input_mode = "steer"
     agent_mock.steer.return_value = True
 

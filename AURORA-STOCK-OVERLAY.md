@@ -14,7 +14,7 @@ git log --oneline --reverse origin/main..HEAD
 ## Retained upgrades
 
 1. **Authenticated owner busy-turn supersession**
-   - Exact primary `user_id` membership in a dedicated ``{PLATFORM}_OWNER_USER_IDS`` env list grants owner control-plane authority; alternate IDs, pairing approvals, wildcard access, and conversation allowlists cannot bypass stock authorization.
+   - Exact primary `user_id` membership in the platform's dedicated `gateway.platforms.<platform>.owner_user_ids` config list grants owner control-plane authority; the loader stores it in platform `extra`, while alternate IDs, pairing approvals, wildcard access, environment variables, and conversation allowlists cannot bypass stock authorization.
    - Pairing-mirrored conversation allowlists are never used as the owner authority source, so approving a pairing code cannot silently grant control-plane priority.
    - A non-empty external owner text message becomes the next standalone turn and interrupts stale active work instead of being steered, queued behind stale work, media-merged, dropped at the queue cap, or demoted behind subagent/compression protection. Internal/system-generated events never gain owner authority. Existing pending work moves behind the owner turn in FIFO order; when the 32-turn cap is already full, the stale tail is evicted instead of the owner instruction.
    - During the short agent-startup sentinel window, the owner turn still becomes the standalone queue head but does not attempt an interrupt because no real agent exists yet.

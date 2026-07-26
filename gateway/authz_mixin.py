@@ -345,47 +345,54 @@ class GatewayAuthorizationMixin:
         return getattr(self, "pairing_store", None)
 
     def _is_explicit_owner_source(self, source: SessionSource) -> bool:
-        """Return whether *source* is an exact platform-allowlist owner.
+        """Return whether *source* is an exact config-declared owner.
 
         This is deliberately narrower than ``_is_user_authorized``. Pairing,
         roles, chat allowlists, and allow-all flags grant conversation access;
         they do not grant control-plane authority over an active agent turn.
-        User-controlled display labels are never considered. A dedicated
-        ``{PLATFORM}_OWNER_USER_IDS`` list is the only source of owner
-        authority — never the pairing-mirrored conversation allowlist.
+        User-controlled display labels are never considered. Owner authority is
+        read only from ``gateway.platforms.<platform>.extra.owner_user_ids`` in
+        config.yaml; pairing never mutates that security boundary.
         """
         if source is None or getattr(source, "is_bot", False) is True:
             return False
-        platform = getattr(getattr(source, "platform", None), "value", None)
-        if not platform:
+        raw_platform = getattr(source, "platform", None)
+        platform_name = getattr(raw_platform, "value", None)
+        if not platform_name:
             return False
         user_id = str(getattr(source, "user_id", None) or "").strip()
         if not user_id:
             return False
-        env_map = {
-            "telegram": "TELEGRAM_OWNER_USER_IDS",
-            "discord": "DISCORD_OWNER_USER_IDS",
-            "whatsapp": "WHATSAPP_OWNER_USER_IDS",
-            "whatsapp_cloud": "WHATSAPP_CLOUD_OWNER_USER_IDS",
-            "slack": "SLACK_OWNER_USER_IDS",
-            "signal": "SIGNAL_OWNER_USER_IDS",
-            "email": "EMAIL_OWNER_USER_IDS",
-            "sms": "SMS_OWNER_USER_IDS",
-            "mattermost": "MATTERMOST_OWNER_USER_IDS",
-            "matrix": "MATRIX_OWNER_USER_IDS",
-            "dingtalk": "DINGTALK_OWNER_USER_IDS",
-            "feishu": "FEISHU_OWNER_USER_IDS",
-            "wecom": "WECOM_OWNER_USER_IDS",
-            "wecom_callback": "WECOM_CALLBACK_OWNER_USER_IDS",
-            "weixin": "WEIXIN_OWNER_USER_IDS",
-            "bluebubbles": "BLUEBUBBLES_OWNER_USER_IDS",
-            "qqbot": "QQ_OWNER_USER_IDS",
-            "yuanbao": "YUANBAO_OWNER_USER_IDS",
-        }
-        env_name = env_map.get(str(platform))
-        if not env_name:
+        try:
+            platform = (
+                raw_platform
+                if isinstance(raw_platform, Platform)
+                else Platform(str(platform_name))
+            )
+        except (TypeError, ValueError):
             return False
-        allowed = _coerce_allow_set(_auth_env(env_name)) - {"*"}
+
+        # Prefer the profile-specific live adapter in multiplex mode.  The
+        # runner config remains the canonical fallback for the default profile
+        # and for tests that do not construct a full adapter registry.
+        raw_owner_ids = None
+        adapter = self._authorization_adapter(
+            raw_platform,
+            getattr(source, "profile", None),
+        )
+        adapter_extra = getattr(getattr(adapter, "config", None), "extra", None)
+        if isinstance(adapter_extra, dict) and "owner_user_ids" in adapter_extra:
+            raw_owner_ids = adapter_extra.get("owner_user_ids")
+
+        if raw_owner_ids is None:
+            config = getattr(self, "config", None)
+            platforms = getattr(config, "platforms", None)
+            platform_config = platforms.get(platform) if isinstance(platforms, dict) else None
+            platform_extra = getattr(platform_config, "extra", None)
+            if isinstance(platform_extra, dict):
+                raw_owner_ids = platform_extra.get("owner_user_ids")
+
+        allowed = _coerce_allow_set(raw_owner_ids) - {"*"}
         return user_id in allowed
 
     def _is_user_authorized(self, source: SessionSource) -> bool:

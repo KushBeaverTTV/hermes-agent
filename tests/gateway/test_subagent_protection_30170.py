@@ -48,6 +48,12 @@ sys.modules.setdefault("telegram", _tg)
 sys.modules.setdefault("telegram.constants", _tg.constants)
 sys.modules.setdefault("telegram.ext", types.ModuleType("telegram.ext"))
 
+from gateway.config import (  # noqa: E402
+    GatewayConfig,
+    Platform,
+    PlatformConfig,
+    load_gateway_config,
+)
 from gateway.platforms.base import (  # noqa: E402
     MessageEvent,
     MessageType,
@@ -83,7 +89,9 @@ def _make_runner() -> GatewayRunner:
     runner._busy_ack_ts = {}
     runner._draining = False
     runner.adapters = {}
-    runner.config = MagicMock()
+    runner.config = GatewayConfig(
+        platforms={Platform.TELEGRAM: PlatformConfig(enabled=True, extra={})}
+    )
     runner.session_store = None
     runner.hooks = MagicMock()
     runner.hooks.emit = AsyncMock()
@@ -91,6 +99,10 @@ def _make_runner() -> GatewayRunner:
     runner.pairing_store.is_approved.return_value = False
     runner._is_user_authorized = lambda _source: True
     return runner
+
+
+def _set_owner_ids(runner, *user_ids: str) -> None:
+    runner.config.platforms[Platform.TELEGRAM].extra["owner_user_ids"] = list(user_ids)
 
 
 def _make_adapter() -> MagicMock:
@@ -327,13 +339,8 @@ class TestBusyHandlerDemotesInterruptForSubagents:
         self, monkeypatch
     ) -> None:
         """Authenticated owner text is the next real turn, never a stale steer."""
-        monkeypatch.setattr(
-            "gateway.authz_mixin._auth_env",
-            lambda name, default="": "user1"
-            if name == "TELEGRAM_OWNER_USER_IDS"
-            else default,
-        )
         runner = _make_runner()
+        _set_owner_ids(runner, "user1")
         runner._busy_input_mode = "steer"
         runner._busy_text_mode = "queue"
         adapter = _make_adapter()
@@ -355,13 +362,8 @@ class TestBusyHandlerDemotesInterruptForSubagents:
     async def test_exact_owner_preempts_full_media_queue_as_standalone_head(
         self, monkeypatch
     ) -> None:
-        monkeypatch.setattr(
-            "gateway.authz_mixin._auth_env",
-            lambda name, default="": "user1"
-            if name == "TELEGRAM_OWNER_USER_IDS"
-            else default,
-        )
         runner = _make_runner()
+        _set_owner_ids(runner, "user1")
         runner._busy_input_mode = "queue"
         adapter = _make_adapter()
         owner_event = _make_event(text="answer this now")
@@ -442,14 +444,51 @@ class TestBusyHandlerDemotesInterruptForSubagents:
 
 
 class TestExplicitOwnerSource:
-    def test_matches_exact_primary_user_id_but_not_alt_only(self, monkeypatch) -> None:
-        monkeypatch.setattr(
-            "gateway.authz_mixin._auth_env",
-            lambda name, default="": "owner-primary,owner-alt"
-            if name == "TELEGRAM_OWNER_USER_IDS"
-            else default,
+    def test_real_yaml_path_bridges_owner_ids_into_platform_extra(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        (tmp_path / "config.yaml").write_text(
+            "gateway:\n"
+            "  platforms:\n"
+            "    telegram:\n"
+            "      enabled: true\n"
+            "      owner_user_ids:\n"
+            "        - config-owner\n",
+            encoding="utf-8",
         )
+        monkeypatch.setattr("gateway.config.get_hermes_home", lambda: tmp_path)
+
+        config = load_gateway_config()
+
+        assert config.platforms[Platform.TELEGRAM].extra["owner_user_ids"] == [
+            "config-owner"
+        ]
+
+    def test_loads_owner_ids_from_platform_config_and_ignores_env(self, monkeypatch) -> None:
+        monkeypatch.setenv("TELEGRAM_OWNER_USER_IDS", "env-only")
         runner = _make_runner()
+        runner.config = GatewayConfig.from_dict(
+            {
+                "platforms": {
+                    "telegram": {
+                        "enabled": True,
+                        "extra": {"owner_user_ids": ["config-owner"]},
+                    }
+                }
+            }
+        )
+        source = _make_event().source
+        source.platform = Platform.TELEGRAM
+
+        source.user_id = "config-owner"
+        assert runner._is_explicit_owner_source(source) is True
+
+        source.user_id = "env-only"
+        assert runner._is_explicit_owner_source(source) is False
+
+    def test_matches_exact_primary_user_id_but_not_alt_only(self, monkeypatch) -> None:
+        runner = _make_runner()
+        _set_owner_ids(runner, "owner-primary", "owner-alt")
         source = _make_event().source
 
         source.user_id = "owner-primary"
@@ -460,13 +499,8 @@ class TestExplicitOwnerSource:
         assert runner._is_explicit_owner_source(source) is False
 
     def test_rejects_wildcard_and_user_controlled_labels(self, monkeypatch) -> None:
-        monkeypatch.setattr(
-            "gateway.authz_mixin._auth_env",
-            lambda name, default="": "*"
-            if name == "TELEGRAM_OWNER_USER_IDS"
-            else default,
-        )
         runner = _make_runner()
+        _set_owner_ids(runner, "*")
         source = _make_event().source
         source.user_id = "guest"
         source.user_name = "owner-primary"
