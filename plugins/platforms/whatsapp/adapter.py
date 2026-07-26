@@ -41,7 +41,7 @@ logger = logging.getLogger(__name__)
 _OWNER_REPLY_PREFIX = "[owner reply] "
 
 
-def _listener_pids_on_port(port: int) -> list:
+def _listener_pids_on_port(port: int, *, proc_root: Path = Path("/proc")) -> list[int]:
     """PIDs of processes *listening* on ``port`` (POSIX) — never clients.
 
     This must match only LISTEN sockets. A bare ``lsof -i :PORT`` (or
@@ -76,7 +76,74 @@ def _listener_pids_on_port(port: int) -> list:
             pids.append(int(m.group(1)))
     except FileNotFoundError:
         pass
-    return pids
+
+    if pids or not (proc_root / "net/tcp").exists():
+        return list(dict.fromkeys(pids))
+
+    # Minimal Linux fallback for containers that ship neither lsof nor ss.
+    # /proc/net/tcp{,6} identifies LISTEN socket inodes; matching only those
+    # inodes against process fd symlinks preserves the never-kill-clients
+    # contract above.
+    listener_inodes: set[str] = set()
+    port_hex = f"{port:04X}"
+    for table in (proc_root / "net/tcp", proc_root / "net/tcp6"):
+        try:
+            for line in table.read_text().splitlines()[1:]:
+                fields = line.split()
+                if (
+                    len(fields) > 9
+                    and fields[1].rsplit(":", 1)[-1].upper() == port_hex
+                    and fields[3] == "0A"
+                ):
+                    listener_inodes.add(fields[9])
+        except OSError:
+            continue
+
+    if not listener_inodes:
+        return []
+
+    try:
+        proc_entries = os.scandir(proc_root)
+    except OSError:
+        return []
+    with proc_entries:
+        for proc_entry in proc_entries:
+            if not proc_entry.name.isdigit():
+                continue
+            try:
+                with os.scandir(proc_root / proc_entry.name / "fd") as fds:
+                    for fd in fds:
+                        try:
+                            target = os.readlink(fd.path)
+                        except OSError:
+                            continue
+                        if target.startswith("socket:[") and target[8:-1] in listener_inodes:
+                            pids.append(int(proc_entry.name))
+                            break
+            except OSError:
+                continue
+
+    return list(dict.fromkeys(pids))
+
+
+def _terminate_listener_pid(pid: int, port: int) -> None:
+    """Revalidate listener ownership and signal without a PID-recycle race."""
+    pidfd_open = getattr(os, "pidfd_open", None)
+    pidfd_send_signal = getattr(signal, "pidfd_send_signal", None)
+    if pidfd_open is not None and pidfd_send_signal is not None:
+        fd = pidfd_open(pid, 0)
+        try:
+            if pid not in _listener_pids_on_port(port):
+                return
+            pidfd_send_signal(fd, signal.SIGTERM, None, 0)
+        finally:
+            os.close(fd)
+        return
+
+    # Non-Linux fallback: narrow the unavoidable race by revalidating
+    # immediately before signalling. Linux uses the stable pidfd path above.
+    if pid in _listener_pids_on_port(port):
+        os.kill(pid, signal.SIGTERM)
 
 
 def _kill_port_process(port: int) -> None:
@@ -110,7 +177,7 @@ def _kill_port_process(port: int) -> None:
             # tab on a local dev server, etc.) must never be killed.
             for pid in _listener_pids_on_port(port):
                 try:
-                    os.kill(pid, signal.SIGTERM)
+                    _terminate_listener_pid(pid, port)
                 except (ProcessLookupError, PermissionError, OSError):
                     pass
     except Exception:

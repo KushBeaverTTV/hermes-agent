@@ -1338,11 +1338,9 @@ class GatewaySlashCommandsMixin:
         # Native supervisor markers cover direct systemd/launchd starts. The
         # explicit marker covers wrappers such as ``sudo env -i`` that strip
         # those markers before execing the foreground gateway.
-        from gateway.restart import is_gateway_supervisor_process
+        from gateway.restart import is_gateway_restart_managed
 
-        _under_service = is_gateway_supervisor_process()
-        _in_container = os.path.exists("/.dockerenv") or os.path.exists("/run/.containerenv")
-        if _under_service or _in_container:
+        if is_gateway_restart_managed():
             self.request_restart(detached=False, via_service=True)
         else:
             self.request_restart(detached=True, via_service=False)

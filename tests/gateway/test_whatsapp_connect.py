@@ -528,16 +528,56 @@ class TestKillPortProcess:
         """
         from plugins.platforms.whatsapp import adapter as wa
 
-        kills = []
         with patch("plugins.platforms.whatsapp.adapter._IS_WINDOWS", False), \
              patch("plugins.platforms.whatsapp.adapter._listener_pids_on_port",
                    return_value=[55555]) as mock_listeners, \
-             patch("plugins.platforms.whatsapp.adapter.os.kill",
-                   side_effect=lambda pid, sig: kills.append((pid, sig))):
+             patch("plugins.platforms.whatsapp.adapter._terminate_listener_pid") as mock_terminate:
             wa._kill_port_process(3000)
 
         mock_listeners.assert_called_once_with(3000)
-        assert kills == [(55555, signal.SIGTERM)]
+        mock_terminate.assert_called_once_with(55555, 3000)
+
+    def test_proc_fallback_finds_ipv4_ipv6_listeners_only_and_deduplicates(self, tmp_path):
+        from plugins.platforms.whatsapp import adapter as wa
+
+        proc = tmp_path / "proc"
+        (proc / "net").mkdir(parents=True)
+        header = "sl local_address rem_address st tx_queue rx_queue tr tm->when retrnsmt uid timeout inode\n"
+        ipv4_listener = "0: 0100007F:0BB8 00000000:0000 0A 00000000:00000000 00:00000000 00000000 1000 0 111 1\n"
+        ipv4_client = "1: 0100007F:0BB8 0100007F:1234 01 00000000:00000000 00:00000000 00000000 1000 0 333 1\n"
+        ipv6_listener = "0: 00000000000000000000000000000000:0BB8 00000000000000000000000000000000:0000 0A 00000000:00000000 00:00000000 00000000 1000 0 222 1\n"
+        (proc / "net/tcp").write_text(header + ipv4_listener + ipv4_client)
+        (proc / "net/tcp6").write_text(header + ipv6_listener)
+        for pid, inodes in ((101, (111, 111)), (202, (222,)), (303, (333,))):
+            fd_dir = proc / str(pid) / "fd"
+            fd_dir.mkdir(parents=True)
+            for index, inode in enumerate(inodes):
+                (fd_dir / str(index)).symlink_to(f"socket:[{inode}]")
+
+        with patch("plugins.platforms.whatsapp.adapter.subprocess.run", side_effect=FileNotFoundError):
+            assert wa._listener_pids_on_port(3000, proc_root=proc) == [101, 202]
+
+    def test_pidfd_revalidates_before_signalling_and_closes_fd(self):
+        from plugins.platforms.whatsapp import adapter as wa
+
+        with patch.object(wa.os, "pidfd_open", return_value=77, create=True), \
+             patch.object(wa.signal, "pidfd_send_signal", create=True) as mock_send, \
+             patch.object(wa.os, "close") as mock_close, \
+             patch("plugins.platforms.whatsapp.adapter._listener_pids_on_port", return_value=[]):
+            wa._terminate_listener_pid(55555, 3000)
+        mock_send.assert_not_called()
+        mock_close.assert_called_once_with(77)
+
+    def test_pidfd_signals_stable_listener(self):
+        from plugins.platforms.whatsapp import adapter as wa
+
+        with patch.object(wa.os, "pidfd_open", return_value=77, create=True), \
+             patch.object(wa.signal, "pidfd_send_signal", create=True) as mock_send, \
+             patch.object(wa.os, "close") as mock_close, \
+             patch("plugins.platforms.whatsapp.adapter._listener_pids_on_port", return_value=[55555]):
+            wa._terminate_listener_pid(55555, 3000)
+        mock_send.assert_called_once_with(77, signal.SIGTERM, None, 0)
+        mock_close.assert_called_once_with(77)
 
     def test_no_kill_when_no_listener_on_port(self):
         """No LISTENer on the port → nothing is signalled."""

@@ -19,6 +19,7 @@ Covers:
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -34,7 +35,16 @@ def _fixture(tmp_path: Path):
 
 
 def _items(word: str):
-    resp = server.handle_request({"id": "1", "method": "complete.path", "params": {"word": word}})
+    # The gateway may have a configured profile cwd that intentionally wins
+    # over the daemon process cwd.  Completion clients send their live cwd, so
+    # make that part of the request contract instead of relying on chdir alone.
+    resp = server.handle_request(
+        {
+            "id": "1",
+            "method": "complete.path",
+            "params": {"word": word, "cwd": os.getcwd()},
+        }
+    )
 
     return [(it["text"], it["display"], it.get("meta", "")) for it in resp["result"]["items"]]
 

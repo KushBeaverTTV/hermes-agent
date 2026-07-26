@@ -104,10 +104,16 @@ def _build_subprocess_env() -> dict[str, str]:
     # provider credentials. Route through the central helper so Tier-1 secrets
     # (gateway bot tokens, GitHub auth, infra) are still stripped (#29157).
     env = hermes_subprocess_env(inherit_credentials=True)
-    home = _resolve_home_dir()
+    # Copilot stores its auth/config below the OS user's HOME. The generic
+    # subprocess helper may intentionally select HERMES_HOME/home in a
+    # container, but that would hide the user's real Copilot login. ACP is a
+    # credential-consuming CLI, so restore the resolved parent HOME after
+    # sanitization and keep the companion marker in sync.
+    # The central sanitizer's real-home marker is authoritative when present:
+    # parent HOME may intentionally point at a profile-scoped directory.
+    home = env.get("HERMES_REAL_HOME", "").strip() or _resolve_home_dir()
     env["HOME"] = home
-    from hermes_constants import apply_subprocess_home_env
-    apply_subprocess_home_env(env)
+    env["HERMES_REAL_HOME"] = home
     return env
 
 

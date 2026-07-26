@@ -1,0 +1,52 @@
+#!/bin/sh
+# Aurora custom-image startup identity check.
+# Runs inside the container (cont-init or manual). Fails loudly if the image
+# does not carry the expected repaired source, fixed sqlite, fork wheels, STT.
+set -eu
+
+PY=/opt/hermes/.venv/bin/python3
+fail() { echo "AURORA-STARTUP-FAIL: $*" >&2; exit 1; }
+
+# 1. Fixed sqlite branch
+"$PY" - <<'PY' || fail "sqlite not fixed branch"
+import sqlite3
+v = sqlite3.sqlite_version
+maj, minr, patch = map(int, v.split('.'))
+ok = ((maj == 3 and minr == 44 and patch >= 6)
+      or (maj == 3 and minr == 50 and patch >= 7)
+      or (maj == 3 and minr == 51 and patch >= 3)
+      or (maj > 3 or (maj == 3 and minr > 51)))
+assert ok, f"vulnerable sqlite {v}"
+print(f"AURORA-STARTUP: sqlite {v} OK")
+PY
+
+# 2. faster-whisper present
+"$PY" -c "import faster_whisper" 2>/dev/null || fail "faster-whisper missing"
+echo "AURORA-STARTUP: faster-whisper OK"
+
+# 3. Mnemosyne fork versions
+"$PY" - <<'PY' || fail "mnemosyne fork mismatch"
+import importlib.metadata as md
+assert md.version("mnemosyne-memory") == "3.14.2", md.version("mnemosyne-memory")
+assert md.version("mnemosyne-hermes") == "0.5.2", md.version("mnemosyne-hermes")
+print("AURORA-STARTUP: mnemosyne core=3.14.2 provider=0.5.2 OK")
+PY
+
+# 4. Owner authority source and immutable build identity present
+[ -s /opt/hermes/.hermes_build_sha ] || fail "base build SHA missing"
+[ -s /opt/aurora-authority-sha ] || fail "authority build SHA missing"
+cmp -s /opt/hermes/.hermes_build_sha /opt/aurora-authority-sha \
+  || fail "base/authority SHA mismatch"
+"$PY" -c "from agent.owner_directive_capture import is_explicit_owner_source" 2>/dev/null \
+  || fail "owner authority capture missing"
+grep -q "owner_supersedes = is_explicit_owner_source" /opt/hermes/gateway/run.py \
+  || fail "owner gateway control-plane wiring missing"
+echo "AURORA-STARTUP: owner authority SHA $(cat /opt/aurora-authority-sha) OK"
+
+# 5. No embedded secrets (image must not bake tokens)
+for f in /opt/hermes/.env /opt/hermes/auth.json; do
+  [ -e "$f" ] && fail "embedded secret file present: $f"
+done
+echo "AURORA-STARTUP: no embedded secrets OK"
+
+echo "AURORA-STARTUP: all identity checks passed"

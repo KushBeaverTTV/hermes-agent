@@ -6,6 +6,7 @@ from xml.etree import ElementTree as ET
 import pytest
 
 from gateway.config import PlatformConfig
+from gateway.platforms.base import MessageEvent, MessageType
 from plugins.platforms.wecom.callback_adapter import WecomCallbackAdapter
 from plugins.platforms.wecom.wecom_crypto import WXBizMsgCrypt
 
@@ -26,6 +27,18 @@ def _config(apps=None):
         enabled=True,
         extra={"mode": "callback", "host": "127.0.0.1", "port": 0, "apps": apps or [_app()]},
     )
+
+
+@pytest.fixture()
+def callback_xml_parser(monkeypatch):
+    """Use stdlib XML only for these trusted unit-test fixtures.
+
+    ``defusedxml`` is an optional WeCom extra, so the adapter correctly leaves
+    its parser unavailable when that extra is not installed. Event-building
+    tests inject a parser rather than making this misc family depend on the
+    optional runtime package.
+    """
+    monkeypatch.setattr("plugins.platforms.wecom.callback_adapter.ET", ET)
 
 
 class TestWecomCrypto:
@@ -55,7 +68,7 @@ class TestWecomCrypto:
 
 
 class TestWecomCallbackEventConstruction:
-    def test_build_event_extracts_text_message(self):
+    def test_build_event_extracts_text_message(self, callback_xml_parser):
         adapter = WecomCallbackAdapter(_config())
         xml_text = """
         <xml>
@@ -75,7 +88,7 @@ class TestWecomCallbackEventConstruction:
         assert event.message_id == "123456789"
         assert event.text == "\u4f60\u597d"
 
-    def test_build_event_returns_none_for_subscribe(self):
+    def test_build_event_returns_none_for_subscribe(self, callback_xml_parser):
         adapter = WecomCallbackAdapter(_config())
         xml_text = """
         <xml>
@@ -287,18 +300,17 @@ class TestWecomCallbackPollLoop:
             calls.append(event.text)
 
         monkeypatch.setattr(adapter, "handle_message", fake_handle_message)
-        event = adapter._build_event(
-            _app(),
-            """
-            <xml>
-              <ToUserName>ww1234567890</ToUserName>
-              <FromUserName>lisi</FromUserName>
-              <CreateTime>1710000000</CreateTime>
-              <MsgType>text</MsgType>
-              <Content>test</Content>
-              <MsgId>m2</MsgId>
-            </xml>
-            """,
+        event = MessageEvent(
+            text="test",
+            message_type=MessageType.TEXT,
+            source=adapter.build_source(
+                chat_id="ww1234567890:lisi",
+                chat_name="lisi",
+                chat_type="dm",
+                user_id="lisi",
+                user_name="lisi",
+            ),
+            message_id="m2",
         )
         task = asyncio.create_task(adapter._poll_loop())
         await adapter._message_queue.put(event)

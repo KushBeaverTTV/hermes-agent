@@ -45,6 +45,25 @@ def is_gateway_supervisor_process(
     }
 
 
+def is_gateway_restart_managed(
+    environ: Mapping[str, str] | None = None,
+    *,
+    containerized: bool | None = None,
+) -> bool:
+    """Return whether an external runtime owns restarting this gateway.
+
+    ``containerized`` is injectable so callers and tests that model a plain
+    host do not inherit the ambient runtime of the process running them.
+    Production callers omit it and retain the existing Docker/Podman marker
+    detection.
+    """
+    if is_gateway_supervisor_process(environ):
+        return True
+    if containerized is not None:
+        return containerized
+    return os.path.exists("/.dockerenv") or os.path.exists("/run/.containerenv")
+
+
 def parse_restart_drain_timeout(raw: object) -> float:
     """Parse a configured drain timeout, falling back to the shared default."""
     try:

@@ -1,0 +1,84 @@
+# syntax=docker/dockerfile:1
+# Aurora custom Hermes image — durable end-state (not userspace overlay).
+# Build context: /opt/data/hermes-agent (branch fix/insights-mixed-timestamp-20260725)
+#
+# Content guarantees baked in:
+#   - Hermes authority commits f3a611734 + 8d74b014c (source checkout = context)
+#   - Mnemosyne fork wheels (core 3.14.2 / provider 0.5.2)
+#   - Fixed SQLite 3.51.3 runtime (branch 3.51.3+, NOT naive semver)
+#   - faster-whisper local STT
+#   - correct `hermes gateway` invocation (s6 main service, no obsolete `run`)
+#   - watchdog + healthcheck + startup identity checks
+#   - no embedded secrets
+#
+# The upstream base is built immediately beforehand from this same checkout's
+# Dockerfile, whose uv/node/debian official images are all digest-pinned.
+# Use a unique git-SHA tag in the runbook so this intermediate cannot float.
+ARG AURORA_BASE=hermes-upstream:local
+FROM ${AURORA_BASE}
+
+ARG AURORA_AUTHORITY_SHA
+USER root
+RUN test -n "$AURORA_AUTHORITY_SHA" \
+    && test "$(cat /opt/hermes/.hermes_build_sha)" = "$AURORA_AUTHORITY_SHA" \
+    && printf '%s\n' "$AURORA_AUTHORITY_SHA" > /opt/aurora-authority-sha
+
+# ---------- Fixed SQLite 3.51.3 (branch-correct) ----------
+# Stock base links vulnerable 3.46.1. We install 3.51.3 built from
+# sqlite-autoconf-3510300 and force it via ld.so preload so every Python
+# sqlite3 in the image resolves the fixed branch. Naive semver rejected:
+# 3.46.1 must not pass merely for being numerically above 3.44.6.
+COPY vendor/sqlite/sqlite-autoconf-3510300.tar.gz /opt/aurora/sqlite-src/
+RUN cd /opt/aurora/sqlite-src \
+    && echo "81f5be397049b0cae1b167f2225af7646fc0f82e4a9b3c48c9ea3a533e21d77a  sqlite-autoconf-3510300.tar.gz" | sha256sum -c - \
+    && tar xzf sqlite-autoconf-3510300.tar.gz \
+    && cd sqlite-autoconf-3510300 \
+    && ./configure --prefix=/usr/local \
+    && make -j"$(nproc)" \
+    && make install \
+    && /sbin/ldconfig \
+    && echo "/usr/local/lib/libsqlite3.so.0" > /etc/ld.so.preload \
+    && rm -rf /opt/aurora/sqlite-src
+# Startup identity check: fail the container build if sqlite is not the fixed branch.
+RUN /opt/hermes/.venv/bin/python3 -c "import sqlite3; v=sqlite3.sqlite_version; \
+    maj,minr,patch=map(int,v.split('.')); \
+    ok=(maj,minr,patch)>=(3,44,6) and ( \
+        (maj==3 and minr==44 and patch>=6) or \
+        (maj==3 and minr==50 and patch>=7) or \
+        (maj==3 and minr==51 and patch>=3) or \
+        (maj>3 or (maj==3 and minr>51)) \
+    ); \
+    assert ok, f'vulnerable sqlite {v}'; print('sqlite OK', v)"
+
+# ---------- faster-whisper local STT ----------
+RUN uv pip install --python /opt/hermes/.venv/bin/python3 --no-cache "faster-whisper==1.2.1" \
+    && /opt/hermes/.venv/bin/python3 -c "import faster_whisper; print('faster-whisper', faster_whisper.__version__)"
+
+# ---------- Mnemosyne fork wheels (authoritative versions) ----------
+COPY vendor/mnemosyne/mnemosyne_memory-3.14.2-py3-none-any.whl /opt/aurora/wheels/
+COPY vendor/mnemosyne/mnemosyne_hermes-0.5.2-py3-none-any.whl /opt/aurora/wheels/
+# Wheel integrity (hashes recorded from promoted artifacts — build fails on drift).
+RUN cd /opt/aurora/wheels \
+    && echo "6217aafb85796e783610a234d8a3762bf46835e7f64c0910703949d7ace6ce7e  mnemosyne_memory-3.14.2-py3-none-any.whl" > SHA256SUMS \
+    && echo "af028d0dc8b2a4f52c17f9767099881b00a58366805908c00855e360f0bf1a2a  mnemosyne_hermes-0.5.2-py3-none-any.whl" >> SHA256SUMS \
+    && sha256sum -c SHA256SUMS \
+    && uv pip install --python /opt/hermes/.venv/bin/python3 --no-cache --reinstall --no-deps \
+        mnemosyne_memory-3.14.2-py3-none-any.whl mnemosyne_hermes-0.5.2-py3-none-any.whl
+
+# ---------- Startup identity + authority self-check ----------
+COPY docker/aurora-startup-check.sh /opt/aurora/startup-check.sh
+COPY docker/aurora-main-wrapper.sh /opt/aurora/main-wrapper.sh
+COPY docker/aurora-gateway-healthcheck.py /opt/aurora/gateway-healthcheck.py
+RUN chmod 0755 /opt/aurora/startup-check.sh /opt/aurora/main-wrapper.sh /opt/aurora/gateway-healthcheck.py
+
+# ---------- Healthcheck (exact argv + non-zombie process; no self-match) ----------
+HEALTHCHECK --interval=30s --timeout=10s --start-period=90s --retries=3 \
+  CMD ["/usr/bin/python3", "/opt/aurora/gateway-healthcheck.py"]
+
+# s6 services remain inherited from AURORA_BASE. Custom startup fails closed on
+# identity first, then the upstream wrapper executes exact `hermes gateway`
+# (NOT obsolete `hermes gateway run`). Docker `--restart unless-stopped` is the
+# outer durable watchdog; s6 remains PID 1 and healthcheck detects gateway death.
+ENV AURORA_IMAGE=1
+ENTRYPOINT [ "/init", "/opt/aurora/main-wrapper.sh" ]
+CMD [ "gateway" ]

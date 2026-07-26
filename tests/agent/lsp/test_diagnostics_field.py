@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
+import pytest
 
 from tools.environments.local import LocalEnvironment
 from tools.file_operations import (
@@ -15,6 +16,12 @@ from tools.file_operations import (
     ShellFileOperations,
     WriteResult,
 )
+
+
+@pytest.fixture(autouse=True)
+def _isolate_write_safe_root(monkeypatch):
+    """These tests exercise diagnostics, not the process-wide write sandbox."""
+    monkeypatch.delenv("HERMES_WRITE_SAFE_ROOT", raising=False)
 
 
 # ---------------------------------------------------------------------------
