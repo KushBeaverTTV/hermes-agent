@@ -6082,6 +6082,17 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
         self._enqueue_fifo(session_key, event, adapter)
 
+    def _is_explicit_owner_event(self, event: MessageEvent) -> bool:
+        """Return whether *event* is external, text-only exact-owner control."""
+        return (
+            not bool(getattr(event, "internal", False))
+            and event.message_type == MessageType.TEXT
+            and bool((event.text or "").strip())
+            and not event.media_urls
+            and not event.media_types
+            and self._is_explicit_owner_source(event.source)
+        )
+
     def _preempt_busy_queue_with_owner_event(
         self,
         session_key: str,
@@ -6150,14 +6161,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             )
             return True  # handled (silently dropped); do not fall through
 
-        explicit_owner = (
-            not bool(getattr(event, "internal", False))
-            and event.message_type == MessageType.TEXT
-            and bool((event.text or "").strip())
-            and not event.media_urls
-            and not event.media_types
-            and self._is_explicit_owner_source(event.source)
-        )
+        explicit_owner = self._is_explicit_owner_event(event)
 
         # --- Draining case (gateway restarting/stopping) ---
         if self._draining:
@@ -11492,14 +11496,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     f"mid-turn. Wait for the current response or `/stop` first."
                 )
 
-            _explicit_owner = (
-                not bool(getattr(event, "internal", False))
-                and event.message_type == MessageType.TEXT
-                and bool((event.text or "").strip())
-                and not event.media_urls
-                and not event.media_types
-                and self._is_explicit_owner_source(source)
-            )
+            _explicit_owner = self._is_explicit_owner_event(event)
 
             if event.message_type == MessageType.PHOTO:
                 logger.debug("PRIORITY photo follow-up for session %s — queueing without interrupt", _quick_key)
