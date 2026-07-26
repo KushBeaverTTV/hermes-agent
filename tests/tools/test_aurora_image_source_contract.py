@@ -74,6 +74,11 @@ def test_startup_check_resolves_custom_aurora_source_and_locked_stt():
     source = STARTUP.read_text(encoding="utf-8")
     assert "EXPECTED_GATEWAY_SOURCE=/opt/hermes/gateway/run.py" in source
     assert "gateway.run.__file__" in source
+    assert "GatewayAuthorizationMixin" in source
+    assert "issubclass(GatewayRunner, GatewayAuthorizationMixin)" in source
+    assert "owner_user_ids" in source
+    assert "self._is_explicit_owner_source" in source
+    assert 'grep -q "owner_supersedes = is_explicit_owner_source"' not in source
     assert "faster_whisper" in source
     assert "mnemosyne" in source
     assert "AURORA STARTUP CHECK PASS" in source

@@ -48,8 +48,20 @@ ACTUAL_GATEWAY_SOURCE="$($PY -c 'import pathlib, gateway.run; print(pathlib.Path
   || fail "gateway source import failed"
 [ "$ACTUAL_GATEWAY_SOURCE" = "$EXPECTED_GATEWAY_SOURCE" ] \
   || fail "gateway source mismatch: $ACTUAL_GATEWAY_SOURCE"
-grep -q "owner_supersedes = is_explicit_owner_source" "$EXPECTED_GATEWAY_SOURCE" \
-  || fail "owner gateway control-plane wiring missing"
+"$PY" - <<'PY' || fail "owner gateway control-plane wiring missing"
+import inspect
+
+from gateway.authz_mixin import GatewayAuthorizationMixin
+from gateway.run import GatewayRunner
+
+assert issubclass(GatewayRunner, GatewayAuthorizationMixin)
+owner_source = inspect.getsource(GatewayAuthorizationMixin._is_explicit_owner_source)
+owner_event = inspect.getsource(GatewayRunner._is_explicit_owner_event)
+assert "owner_user_ids" in owner_source
+assert 'allowed = _coerce_allow_set(raw_owner_ids) - {"*"}' in owner_source
+assert "self._is_explicit_owner_source" in owner_event
+print("AURORA-STARTUP: owner gateway control-plane wiring OK")
+PY
 echo "AURORA-STARTUP: owner authority SHA $(cat /opt/aurora-authority-sha) OK"
 
 # 5. No embedded secrets (image must not bake tokens)
