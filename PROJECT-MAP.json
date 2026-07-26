@@ -1,0 +1,96 @@
+{
+  "project_id": "aurora-hermes-owner-authority-overlay",
+  "project_root": "/opt/data/hermes-agent",
+  "archive_root": "/opt/data/archives/hermes-agent",
+  "code_roots": [
+    "agent",
+    "tools",
+    "gateway",
+    "plugins/platforms/whatsapp",
+    "docker",
+    "scripts",
+    "vendor"
+  ],
+  "source_roots": [
+    "tests/agent",
+    "tests/tools",
+    "tests/gateway"
+  ],
+  "authoritative_docs": [
+    "AURORA-AUTHORITY-OVERLAY.md"
+  ],
+  "excluded_doc_roots": [
+    ".github",
+    ".plans",
+    ".pytest_cache",
+    "apps",
+    "contributors",
+    "docker",
+    "docs",
+    "gateway",
+    "native",
+    "optional-skills",
+    "plugins",
+    "providers",
+    "scripts",
+    "skills",
+    "tests",
+    "ui-tui",
+    "web",
+    "website",
+    "AGENTS.md",
+    "CONTRIBUTING.es.md",
+    "CONTRIBUTING.md",
+    "README.es.md",
+    "README.md",
+    "README.ur-pk.md",
+    "README.zh-CN.md",
+    "SECURITY.es.md",
+    "SECURITY.md",
+    "hermes-already-has-routines.md",
+    "relatorio-issue-69678-sqlite-fd-leaks.md"
+  ],
+  "forbidden_history_roots": [
+    "campaign",
+    "receipts"
+  ],
+  "tied_skills": [
+    "mnemosyne-memory-override"
+  ],
+  "skill_roots": [
+    "/opt/data/skills"
+  ],
+  "mcp_configs": [],
+  "acp_configs": [],
+  "orchestration_configs": [],
+  "dynamic_truth_sources": [
+    "agent/owner_directive_capture.py",
+    "agent/turn_context.py",
+    "tools/memory_tool.py",
+    "tools/skill_manager_tool.py",
+    ".dockerignore",
+    "Dockerfile",
+    "Dockerfile.aurora",
+    "docker/aurora-main-wrapper.sh",
+    "docker/aurora-startup-check.sh",
+    "docker/aurora-gateway-healthcheck.py",
+    "docker/aurora-deploy-runbook.sh",
+    "scripts/docker-inspect-runtime-argv.py",
+    "scripts/validate-aurora-image-context.py",
+    "vendor/mnemosyne/mnemosyne_memory-3.14.2-py3-none-any.whl",
+    "vendor/mnemosyne/mnemosyne_hermes-0.5.2-py3-none-any.whl",
+    "vendor/sqlite/sqlite-autoconf-3510300.tar.gz",
+    "PROJECT-MAP.json"
+  ],
+  "reusable_script_roots": [
+    "scripts/aurora-authority-regression.sh",
+    "scripts/docker-inspect-runtime-argv.py",
+    "scripts/validate-aurora-image-context.py",
+    "docker/aurora-main-wrapper.sh",
+    "docker/aurora-gateway-healthcheck.py",
+    "docker/aurora-deploy-runbook.sh"
+  ],
+  "forbidden_active_doc_patterns": [],
+  "path_reference_exceptions": [],
+  "doc_path_bases": {}
+}
