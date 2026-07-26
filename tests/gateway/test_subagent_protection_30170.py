@@ -88,7 +88,7 @@ def _make_runner() -> GatewayRunner:
     runner.hooks = MagicMock()
     runner.hooks.emit = AsyncMock()
     runner.pairing_store = MagicMock()
-    runner.pairing_store.is_approved.return_value = True
+    runner.pairing_store.is_approved.return_value = False
     runner._is_user_authorized = lambda _source: True
     return runner
 
@@ -330,7 +330,7 @@ class TestBusyHandlerDemotesInterruptForSubagents:
         monkeypatch.setattr(
             "gateway.authz_mixin._auth_env",
             lambda name, default="": "user1"
-            if name == "TELEGRAM_ALLOWED_USERS"
+            if name == "TELEGRAM_OWNER_USER_IDS"
             else default,
         )
         runner = _make_runner()
@@ -358,7 +358,7 @@ class TestBusyHandlerDemotesInterruptForSubagents:
         monkeypatch.setattr(
             "gateway.authz_mixin._auth_env",
             lambda name, default="": "user1"
-            if name == "TELEGRAM_ALLOWED_USERS"
+            if name == "TELEGRAM_OWNER_USER_IDS"
             else default,
         )
         runner = _make_runner()
@@ -446,7 +446,7 @@ class TestExplicitOwnerSource:
         monkeypatch.setattr(
             "gateway.authz_mixin._auth_env",
             lambda name, default="": "owner-primary,owner-alt"
-            if name == "TELEGRAM_ALLOWED_USERS"
+            if name == "TELEGRAM_OWNER_USER_IDS"
             else default,
         )
         runner = _make_runner()
@@ -463,7 +463,7 @@ class TestExplicitOwnerSource:
         monkeypatch.setattr(
             "gateway.authz_mixin._auth_env",
             lambda name, default="": "*"
-            if name == "TELEGRAM_ALLOWED_USERS"
+            if name == "TELEGRAM_OWNER_USER_IDS"
             else default,
         )
         runner = _make_runner()
