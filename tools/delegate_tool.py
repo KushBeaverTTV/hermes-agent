@@ -2194,6 +2194,7 @@ def _run_single_child(
         _input_tokens = getattr(child, "session_prompt_tokens", 0)
         _output_tokens = getattr(child, "session_completion_tokens", 0)
         _model = getattr(child, "model", None)
+        _provider = getattr(child, "provider", None)
 
         entry: Dict[str, Any] = {
             "task_index": task_index,
@@ -2202,6 +2203,7 @@ def _run_single_child(
             "api_calls": api_calls,
             "duration_seconds": duration,
             "model": _model if isinstance(_model, str) else None,
+            "provider": _provider if isinstance(_provider, str) else None,
             "exit_reason": exit_reason,
             "tokens": {
                 "input": (
@@ -2436,19 +2438,24 @@ def delegate_task(
     max_iterations: Optional[int] = None,
     role: Optional[str] = None,
     background: Optional[bool] = None,
+    model: Optional[str] = None,
+    provider: Optional[str] = None,
     parent_agent=None,
 ) -> str:
     """
     Spawn one or more child agents to handle delegated tasks.
 
     Supports two modes:
-      - Single: provide goal (+ optional context and role)
-      - Batch:  provide tasks array [{goal, context, role}, ...]
+      - Single: provide goal (+ optional context, role, model, provider)
+      - Batch:  provide tasks array [{goal, context, role, model, provider}, ...]
 
     The 'role' parameter controls whether a child can further delegate:
     'leaf' (default) cannot; 'orchestrator' retains the delegation
     toolset and can spawn its own workers, bounded by
     delegation.max_spawn_depth.  Per-task role beats the top-level one.
+
+    Per-task (or top-level) model/provider overrides the global
+    delegation.model / delegation.provider pin so one fan-out can mix routes.
 
     Returns JSON with results array, one entry per task.
     """
@@ -2466,6 +2473,9 @@ def delegate_task(
 
     # Normalise the top-level role once; per-task overrides re-normalise.
     top_role = _normalize_role(role)
+    top_model = str(model or "").strip() or None
+    top_provider = str(provider or "").strip() or None
+    top_model, top_provider = _expand_model_provider_alias(top_model, top_provider)
 
     # Background (async) delegation now applies to BOTH single tasks and
     # batches. A batch is dispatched as ONE async unit: the whole fan-out runs
@@ -2539,6 +2549,10 @@ def delegate_task(
         task_list = tasks
     elif goal and isinstance(goal, str) and goal.strip():
         task_list = [{"goal": goal, "context": context, "role": top_role}]
+        if top_model:
+            task_list[0]["model"] = top_model
+        if top_provider:
+            task_list[0]["provider"] = top_provider
     else:
         return tool_error("Provide either 'goal' (single task) or 'tasks' (batch).")
 
@@ -2604,6 +2618,16 @@ def delegate_task(
             # Per-task role beats top-level; normalise again so unknown
             # per-task values warn and degrade to leaf uniformly.
             effective_role = _normalize_role(t.get("role") or top_role)
+            # Top-level model/provider are defaults for batch items that omit
+            # their own route. Copy rather than mutating the caller's dict.
+            if top_model and not t.get("model"):
+                t = {**t, "model": top_model}
+            if top_provider and not t.get("provider"):
+                t = {**t, "provider": top_provider}
+            try:
+                task_creds = _resolve_task_credentials(t, cfg, parent_agent, creds)
+            except ValueError as exc:
+                return tool_error(str(exc))
             child = _build_child_agent(
                 task_index=i,
                 goal=t["goal"],
@@ -2611,18 +2635,18 @@ def delegate_task(
                 # Subagents always inherit the parent's toolsets; the model
                 # cannot choose or narrow them (no model-facing toolsets arg).
                 toolsets=None,
-                model=creds["model"],
+                model=task_creds["model"],
                 max_iterations=effective_max_iter,
                 task_count=n_tasks,
                 parent_agent=parent_agent,
-                override_provider=creds["provider"],
-                override_base_url=creds["base_url"],
-                override_api_key=creds["api_key"],
-                override_api_mode=creds["api_mode"],
-                override_request_overrides=creds.get("request_overrides"),
-                override_max_tokens=creds.get("max_output_tokens"),
-                override_acp_command=creds.get("command"),
-                override_acp_args=creds.get("args"),
+                override_provider=task_creds["provider"],
+                override_base_url=task_creds["base_url"],
+                override_api_key=task_creds["api_key"],
+                override_api_mode=task_creds["api_mode"],
+                override_request_overrides=task_creds.get("request_overrides"),
+                override_max_tokens=task_creds.get("max_output_tokens"),
+                override_acp_command=task_creds.get("command"),
+                override_acp_args=task_creds.get("args"),
                 role=effective_role,
             )
             # Override with correct parent tool names (before child construction mutated global)
@@ -3039,6 +3063,27 @@ def delegate_task(
                     pass
 
         _goals = [t["goal"] for t in task_list]
+        # Completion metadata must reflect actual child routes, not a stale
+        # global delegation pin. Preserve first-seen task order.
+        _child_models = []
+        for _i, _t, _c in children:
+            _model = (
+                getattr(_c, "model", None)
+                or (_t.get("model") if isinstance(_t, dict) else None)
+                or ""
+            )
+            _model = str(_model).strip()
+            if _model and _model not in _child_models:
+                _child_models.append(_model)
+        _attributed_model = (
+            _child_models[0]
+            if len(_child_models) == 1
+            else (
+                " + ".join(_child_models)
+                if _child_models
+                else creds.get("model")
+            )
+        )
         dispatch = dispatch_async_delegation_batch(
             goals=_goals,
             context=context,
@@ -3046,7 +3091,7 @@ def delegate_task(
             # parent's toolsets (no model-facing toolsets arg).
             toolsets=None,
             role=top_role,
-            model=creds["model"],
+            model=_attributed_model,
             session_key=_session_key,
             origin_ui_session_id=_origin_ui_session_id,
             origin_session_id=_wake_sid,
@@ -3197,6 +3242,119 @@ def _resolve_child_credential_pool(
             exc,
         )
     return None
+
+
+# User-facing model/provider nicknames for mixed-model fan-out. Canonical
+# provider/model values remain accepted directly.
+_DELEGATION_MODEL_ALIASES = {
+    "sol": ("openai-codex", "gpt-5.6-sol"),
+    "sol5.6": ("openai-codex", "gpt-5.6-sol"),
+    "5.6sol": ("openai-codex", "gpt-5.6-sol"),
+    "gpt-5.6-sol": ("openai-codex", "gpt-5.6-sol"),
+    "gpt5.6sol": ("openai-codex", "gpt-5.6-sol"),
+    "sol-pro": ("openai-codex", "gpt-5.6-sol-pro"),
+    "solpro": ("openai-codex", "gpt-5.6-sol-pro"),
+    "gpt-5.6-sol-pro": ("openai-codex", "gpt-5.6-sol-pro"),
+    "gpt5.6solpro": ("openai-codex", "gpt-5.6-sol-pro"),
+    "grok": ("xai-oauth", "grok-4.5"),
+    "grok4.5": ("xai-oauth", "grok-4.5"),
+    "grok-4.5": ("xai-oauth", "grok-4.5"),
+    "kimi": ("kimi-coding", "kimi-for-coding"),
+    "kimi-coding": ("kimi-coding", "kimi-for-coding"),
+    "kimiforcoding": ("kimi-coding", "kimi-for-coding"),
+    "kimi-for-coding": ("kimi-coding", "kimi-for-coding"),
+    "kimiforcodinghighspeed": ("kimi-coding", "kimi-for-coding-highspeed"),
+    "kimi-for-coding-highspeed": ("kimi-coding", "kimi-for-coding-highspeed"),
+    "kimi-k3": ("kimi-coding", "k3"),
+    "kimik3": ("kimi-coding", "k3"),
+    "k3": ("kimi-coding", "k3"),
+}
+
+
+def _normalize_model_alias_key(value: str) -> str:
+    import re
+
+    key = (value or "").strip().lower()
+    for separator in (" ", "_", "/", ":"):
+        key = key.replace(separator, "")
+    key = key.replace("xhigh", "").replace("high", "")
+    return re.sub(r"^\d+(?=[a-z])", "", key)
+
+
+def _expand_model_provider_alias(
+    model: Optional[str], provider: Optional[str]
+) -> tuple[Optional[str], Optional[str]]:
+    """Expand stable route nicknames into canonical provider/model values."""
+    resolved_model = (model or "").strip() or None
+    resolved_provider = (provider or "").strip() or None
+    if resolved_model:
+        alias = _DELEGATION_MODEL_ALIASES.get(
+            _normalize_model_alias_key(resolved_model)
+        )
+        if alias:
+            alias_provider, alias_model = alias
+            resolved_provider = resolved_provider or alias_provider
+            resolved_model = alias_model
+    if resolved_provider:
+        provider_key = _normalize_model_alias_key(resolved_provider)
+        if provider_key in {"sol", "luna", "codex", "openaicodex"}:
+            resolved_provider = "openai-codex"
+        elif provider_key in {"grok", "xai", "xaioauth"}:
+            resolved_provider = "xai-oauth"
+        elif provider_key in {"kimi", "kimicoding", "moonshot"}:
+            resolved_provider = "kimi-coding"
+        elif provider_key == "opencodego":
+            resolved_provider = "opencode-go"
+        elif provider_key in {"opencodezen", "opencode"}:
+            resolved_provider = "opencode-zen"
+    return resolved_model, resolved_provider
+
+
+def _resolve_task_credentials(
+    task: Optional[Dict[str, Any]],
+    base_cfg: dict,
+    parent_agent,
+    default_creds: dict,
+) -> dict:
+    """Resolve one task's route without leaking credentials across providers."""
+    task = task if isinstance(task, dict) else {}
+    raw_model = task.get("model")
+    raw_provider = task.get("provider")
+    if isinstance(raw_model, dict):
+        nested = raw_model
+        raw_model = nested.get("model") or nested.get("name") or nested.get("id")
+        raw_provider = raw_provider or nested.get("provider")
+
+    task_model = str(raw_model or "").strip() or None
+    task_provider = str(raw_provider or "").strip() or None
+    task_model, task_provider = _expand_model_provider_alias(
+        task_model, task_provider
+    )
+    if not task_model and not task_provider:
+        return default_creds
+    if task_model and not task_provider:
+        resolved = dict(default_creds)
+        resolved["model"] = task_model
+        return resolved
+
+    cfg = {
+        "model": task_model or base_cfg.get("model") or default_creds.get("model"),
+        "provider": task_provider,
+        "base_url": base_cfg.get("base_url"),
+        "api_key": base_cfg.get("api_key"),
+        "api_mode": base_cfg.get("api_mode"),
+    }
+    if task_provider and str(base_cfg.get("provider") or "").strip() != task_provider:
+        cfg["base_url"] = None
+        cfg["api_key"] = None
+        cfg["api_mode"] = None
+    try:
+        return _resolve_delegation_credentials(cfg, parent_agent)
+    except ValueError as exc:
+        raise ValueError(
+            f"Per-task model route failed for model={task_model!r} "
+            f"provider={task_provider!r}: {exc}"
+        ) from exc
 
 
 def _resolve_delegation_credentials(cfg: dict, parent_agent) -> dict:
@@ -3421,7 +3579,7 @@ def _build_top_level_description() -> str:
         "Only the final summary is returned -- intermediate tool results "
         "never enter your context window.\n\n"
         "TWO MODES (one of 'goal' or 'tasks' is required):\n"
-        "1. Single task: provide 'goal' (+ optional context and role).\n"
+        "1. Single task: provide 'goal' (+ optional context, role, model, provider).\n"
         f"2. Batch (parallel): provide 'tasks' array with up to {max_children} "
         f"items concurrently for this user (configured via "
         f"delegation.max_concurrent_children in config.yaml). {nesting_clause}\n\n"
@@ -3475,7 +3633,11 @@ def _build_top_level_description() -> str:
         f"Orchestrators are bounded by max_spawn_depth={max_depth} for this "
         f"user and can be disabled globally via "
         "delegation.orchestrator_enabled=false.\n"
-        "- Subagent model is NOT selectable per call: children inherit the parent model (plus its fallback chain) unless you pin all subagents to a model via delegation.provider / delegation.model in config.yaml.\n"
+        "- PER-TASK MODELS ARE SUPPORTED. Pass model and/or provider on each "
+        "tasks[] item (or top-level for a single goal) to mix routes in one "
+        "fan-out. Nicknames include sol, sol-pro, grok, kimi, and k3. When "
+        "omitted, children use delegation.provider/model from config.yaml, "
+        "else the parent route.\n"
         "- Each subagent gets its own terminal session (separate working directory and state).\n"
         "- Results are always returned as an array, one entry per task."
     )
@@ -3491,7 +3653,9 @@ def _build_tasks_param_description() -> str:
         f"Batch mode: tasks to run in parallel (up to {max_children} for this "
         f"user, set via delegation.max_concurrent_children). Each gets "
         "its own subagent with isolated context and terminal session. "
-        "When provided, top-level goal/context/role are ignored."
+        "Each task may set model and/or provider to run on a different route. "
+        "When provided, top-level goal/context/role are ignored; top-level "
+        "model/provider still fill in when a task omits them."
     )
 
 
@@ -3604,6 +3768,20 @@ DELEGATE_TASK_SCHEMA = {
                             "enum": ["leaf", "orchestrator"],
                             "description": "Per-task role override. See top-level 'role' for semantics.",
                         },
+                        "model": {
+                            "type": "string",
+                            "description": (
+                                "Model for this task only. Overrides the global "
+                                "delegation model for this child."
+                            ),
+                        },
+                        "provider": {
+                            "type": "string",
+                            "description": (
+                                "Provider for this task only. Pair with model "
+                                "when mixing routes in one batch."
+                            ),
+                        },
                     },
                     "required": ["goal"],
                 },
@@ -3611,6 +3789,20 @@ DELEGATE_TASK_SCHEMA = {
                 # delegation.max_concurrent_children (default 3) and
                 # enforced with a clear error in delegate_task().
                 "description": "(rebuilt at get_definitions() time)",
+            },
+            "model": {
+                "type": "string",
+                "description": (
+                    "Model for a single-goal delegation, or the default for "
+                    "tasks that omit model."
+                ),
+            },
+            "provider": {
+                "type": "string",
+                "description": (
+                    "Provider for a single-goal delegation, or the default for "
+                    "tasks that omit provider."
+                ),
             },
             "role": {
                 "type": "string",
@@ -3689,6 +3881,8 @@ registry.register(
         max_iterations=args.get("max_iterations"),
         role=args.get("role"),
         background=_model_background_value(args, kw.get("parent_agent")),
+        model=args.get("model"),
+        provider=args.get("provider"),
         parent_agent=kw.get("parent_agent"),
     ),
     check_fn=check_delegate_requirements,

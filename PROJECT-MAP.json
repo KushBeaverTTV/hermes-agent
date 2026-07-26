@@ -1,6 +1,6 @@
 {
   "project_id": "aurora-hermes-owner-authority-overlay",
-  "project_root": "/opt/data/hermes-agent",
+  "project_root": "/opt/data/worktrees/aurora-custom-integration",
   "archive_root": "/opt/data/archives/hermes-agent",
   "code_roots": [
     "agent",
@@ -23,6 +23,8 @@
     ".github",
     ".plans",
     ".pytest_cache",
+    ".venv",
+    "node_modules",
     "apps",
     "contributors",
     "docker",
