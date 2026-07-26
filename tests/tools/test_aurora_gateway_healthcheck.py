@@ -109,6 +109,21 @@ def test_duplicate_live_gateways_are_unhealthy_even_with_one_marker(tmp_path):
     assert health.is_healthy(tmp_path, marker) is False
 
 
+def test_stopped_gateway_is_unhealthy_even_with_matching_readiness(tmp_path):
+    marker = tmp_path / "gateway.ready.json"
+    _write_proc(
+        tmp_path,
+        13,
+        ["/opt/hermes/.venv/bin/hermes", "gateway"],
+        state="T",
+        start_time="777",
+    )
+    _write_ready(marker, pid=13, start_time="777")
+
+    assert health.live_gateway_pids(tmp_path) == []
+    assert health.is_healthy(tmp_path, marker) is False
+
+
 def test_dead_gateway_is_unhealthy(tmp_path):
     marker = tmp_path / "gateway.ready.json"
     _write_proc(tmp_path, 10, ["sleep", "infinity"])

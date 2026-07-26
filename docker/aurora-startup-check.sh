@@ -8,6 +8,12 @@ PY=/opt/hermes/.venv/bin/python3
 EXPECTED_GATEWAY_SOURCE=/opt/hermes/gateway/run.py
 fail() { echo "AURORA-STARTUP-FAIL: $*" >&2; exit 1; }
 
+# 0. Base Hermes project remains installed after Aurora overlay dependency sync.
+[ -x /opt/hermes/.venv/bin/hermes ] || fail "Hermes CLI missing from image venv"
+"$PY" -c "import hermes_cli, hermes_constants" 2>/dev/null \
+  || fail "Hermes project modules missing from image venv"
+echo "AURORA-STARTUP: Hermes CLI/project install OK"
+
 # 1. Fixed sqlite branch
 "$PY" - <<'PY' || fail "sqlite not fixed branch"
 import sqlite3

@@ -17,7 +17,9 @@ VERIFIER = ROOT / "scripts/verify-aurora-vendor-manifest.py"
 def test_dockerfile_uses_locked_voice_extra_and_oci_provenance_labels():
     source = DOCKERFILE.read_text(encoding="utf-8")
 
-    assert "uv sync --frozen --no-dev --extra voice" in source
+    assert "uv sync --frozen --inexact --no-dev --extra voice" in source
+    assert "test -x /opt/hermes/.venv/bin/hermes" in source
+    assert "hermes_cli.__file__" in source
     assert "uv pip install --system faster-whisper" not in source
     assert "org.opencontainers.image.revision" in source
     assert "org.opencontainers.image.created" in source
@@ -65,7 +67,9 @@ def test_deploy_runbook_derives_host_data_mount_instead_of_assuming_host_opt_dat
     assert "resolve_host_paths" in source
     assert 'mount.get("Destination") == "/opt/data"' in source
     assert 'ENV_FILE="${ENV_FILE:-$HOST_DATA_DIR/.env}"' in source
-    assert '-v "$HOST_DATA_DIR:/opt/data:rw"' in source
+    assert '-v "$HOST_DATA_DIR/cache/audio:/opt/data/cache/audio:ro"' in source
+    assert '-v "$HOST_DATA_DIR/cache/huggingface:/opt/data/cache/huggingface:rw"' in source
+    assert '-v "$HOST_DATA_DIR:/opt/data:rw"' not in source
     assert '--env-file "$ENV_FILE"' in source
     assert '[[ -r /opt/data/.env ]]' not in source
 
@@ -79,6 +83,8 @@ def test_startup_check_resolves_custom_aurora_source_and_locked_stt():
     assert "owner_user_ids" in source
     assert "self._is_explicit_owner_source" in source
     assert 'grep -q "owner_supersedes = is_explicit_owner_source"' not in source
+    assert '[ -x /opt/hermes/.venv/bin/hermes ]' in source
+    assert "import hermes_cli" in source
     assert "faster_whisper" in source
     assert "mnemosyne" in source
     assert "AURORA STARTUP CHECK PASS" in source

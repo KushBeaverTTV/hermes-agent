@@ -48,7 +48,7 @@ def live_gateway_pids(proc_root: Path = Path("/proc")) -> list[int]:
             state, _ = _proc_state_and_start_time(entry / "stat")
         except (OSError, IndexError, ValueError):
             continue
-        if state != "Z" and is_gateway_argv(argv):
+        if state not in {"Z", "T", "t"} and is_gateway_argv(argv):
             found.append(int(entry.name))
     return sorted(found)
 

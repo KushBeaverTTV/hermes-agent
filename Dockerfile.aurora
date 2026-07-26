@@ -71,8 +71,9 @@ RUN /opt/hermes/.venv/bin/python3 -c "import sqlite3; v=sqlite3.sqlite_version; 
 COPY pyproject.toml uv.lock /opt/aurora/voice-lock/
 RUN --mount=type=cache,target=/root/.cache/uv \
     cd /opt/aurora/voice-lock \
-    && UV_PROJECT_ENVIRONMENT=/opt/hermes/.venv uv sync --frozen --no-dev --extra voice --no-install-project \
-    && /opt/hermes/.venv/bin/python3 -c "import faster_whisper; print('faster-whisper', faster_whisper.__version__)"
+    && UV_PROJECT_ENVIRONMENT=/opt/hermes/.venv uv sync --frozen --inexact --no-dev --extra voice --no-install-project \
+    && test -x /opt/hermes/.venv/bin/hermes \
+    && /opt/hermes/.venv/bin/python3 -c "import faster_whisper, hermes_cli; print('faster-whisper', faster_whisper.__version__, 'hermes_cli', hermes_cli.__file__)"
 ENV HF_HOME=/opt/data/cache/huggingface
 
 # ---------- Mnemosyne fork wheels (authoritative versions) ----------

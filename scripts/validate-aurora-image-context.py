@@ -162,8 +162,12 @@ def validate(root: Path) -> None:
         "OVERLAY FAIL healthcheck absent or self-matching",
     )
     _require(
-        "uv sync --frozen --no-dev --extra voice" in overlay,
-        "OVERLAY FAIL locked voice dependency sync missing",
+        "uv sync --frozen --inexact --no-dev --extra voice" in overlay,
+        "OVERLAY FAIL locked non-pruning voice dependency sync missing",
+    )
+    _require(
+        "test -x /opt/hermes/.venv/bin/hermes" in overlay and "hermes_cli.__file__" in overlay,
+        "OVERLAY FAIL post-sync Hermes project install proof missing",
     )
     _require(
         "uv pip install --system faster-whisper" not in overlay,

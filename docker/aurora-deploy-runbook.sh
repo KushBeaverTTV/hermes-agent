@@ -139,7 +139,11 @@ case "$MODE" in
 
     docker run --rm --platform "$PLATFORM" \
       --entrypoint /opt/aurora/startup-check.sh "$IMAGE"
-    docker run --rm --platform "$PLATFORM" -v "$HOST_DATA_DIR:/opt/data:rw" \
+    [[ -d "$HOST_DATA_DIR/cache/audio" ]] || { echo "INVALID: cached audio directory missing" >&2; exit 1; }
+    mkdir -p "$HOST_DATA_DIR/cache/huggingface"
+    docker run --rm --platform "$PLATFORM" \
+      -v "$HOST_DATA_DIR/cache/audio:/opt/data/cache/audio:ro" \
+      -v "$HOST_DATA_DIR/cache/huggingface:/opt/data/cache/huggingface:rw" \
       --entrypoint /opt/hermes/.venv/bin/python3 "$IMAGE" -c \
       "from faster_whisper import WhisperModel; import glob,os; m=WhisperModel('small', device='cpu', compute_type='int8'); fs=glob.glob('/opt/data/cache/audio/*.ogg'); assert fs, 'no cached audio'; f=max(fs,key=os.path.getmtime); segs,_=m.transcribe(f); text=' '.join(s.text for s in segs).strip(); assert text, 'empty transcription'; print('STT OK chars', len(text))"
 
