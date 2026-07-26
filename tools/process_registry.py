@@ -2136,6 +2136,12 @@ def _format_async_delegation(evt: dict) -> str:
         goals = evt.get("goals") or []
         n = len(results) if results else len(goals)
         total_dur = evt.get("total_duration_seconds", duration)
+        result_models = []
+        for result in sorted(results, key=lambda item: item.get("task_index", 0)):
+            result_model = str(result.get("model") or "").strip()
+            if result_model and result_model not in result_models:
+                result_models.append(result_model)
+        attributed_model = " + ".join(result_models) if result_models else model
         lines = [
             f"[ASYNC DELEGATION BATCH COMPLETE — {deleg_id}]",
             f"A background fan-out of {n} subagent(s) you dispatched earlier "
@@ -2152,7 +2158,9 @@ def _format_async_delegation(evt: dict) -> str:
             lines.append(f"Context you provided: {context}")
         if toolsets:
             lines.append(f"Toolsets: {', '.join(toolsets)}")
-        lines.append(f"Role: {role}   Model: {model}   Total duration: {total_dur}s")
+        lines.append(
+            f"Role: {role}   Model: {attributed_model}   Total duration: {total_dur}s"
+        )
         if error and not results:
             lines.append("--- ERROR ---")
             lines.append(f"The batch did not complete successfully: {error}")
@@ -2171,6 +2179,15 @@ def _format_async_delegation(evt: dict) -> str:
             header += f"  (status={r_status}"
             if r.get("api_calls"):
                 header += f", api_calls={r['api_calls']}"
+            result_model = str(r.get("model") or "").strip()
+            result_provider = str(r.get("provider") or "").strip()
+            if result_model:
+                route = (
+                    f"{result_provider}/{result_model}"
+                    if result_provider
+                    else result_model
+                )
+                header += f", route={route}"
             if r.get("duration_seconds") is not None:
                 header += f", {r['duration_seconds']}s"
             header += ") ---"

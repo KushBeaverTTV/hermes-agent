@@ -559,6 +559,18 @@ def build_turn_context(
     # Preserve the original user message (no nudge injection).
     original_user_message = persist_user_message if persist_user_message is not None else user_message
 
+    # Authority boundary: capture an explicit owner's clean inbound directive
+    # before memory nudges, background review, or model/tool execution can derive
+    # lower-authority guidance from this turn.  Do not swallow failures here:
+    # proceeding after an owner directive failed to journal would recreate the
+    # exact fail-open authority defect this gate exists to prevent.
+    from agent.owner_directive_capture import capture_owner_directive
+    agent._owner_directive_capture_result = capture_owner_directive(
+        agent,
+        original_user_message,
+        turn_id=turn_id,
+    )
+
     # Track memory nudge trigger (turn-based, checked here).
     should_review_memory = False
     if (agent._memory_nudge_interval > 0
@@ -1026,6 +1038,19 @@ def build_turn_context(
             messages, user_message
         )
         agent._persist_user_message_idx = current_turn_user_idx
+
+    # Response-time authority enforcement.  Inject only into the active prompt
+    # after every compression path has settled it; never mutate the cached base
+    # prompt or the clean persisted user message.  Eligible owner/operator turns
+    # fail closed if verified authority cannot be loaded.
+    from agent.owner_directive_capture import build_owner_authority_prompt
+    _owner_authority_prompt = build_owner_authority_prompt(agent)
+    if _owner_authority_prompt:
+        active_system_prompt = (
+            (active_system_prompt or "").rstrip()
+            + "\n\n"
+            + _owner_authority_prompt
+        )
 
     # Plugin hook: pre_llm_call (context injected into user message, not system prompt).
     plugin_user_context = ""

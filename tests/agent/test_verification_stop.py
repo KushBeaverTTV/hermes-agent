@@ -34,6 +34,12 @@ def clear_verify_env(monkeypatch):
     Tests then set only the variable they exercise, mirroring how the CLI/TUI
     set HERMES_SESSION_SOURCE and the gateway sets HERMES_SESSION_PLATFORM.
     """
+    from gateway.session_context import reset_session_vars
+
+    # get_session_env() correctly gives task-local ContextVars precedence over
+    # os.environ.  Other tests in the same worker may have bound those vars, so
+    # reset this test context before exercising the environment fallback.
+    reset_session_vars()
     for var in (
         "HERMES_VERIFY_ON_STOP",
         "HERMES_PLATFORM",
@@ -41,7 +47,8 @@ def clear_verify_env(monkeypatch):
         "HERMES_SESSION_SOURCE",
     ):
         monkeypatch.delenv(var, raising=False)
-    return monkeypatch
+    yield monkeypatch
+    reset_session_vars()
 
 
 def test_verify_on_stop_default_is_auto(clear_verify_env):

@@ -411,6 +411,7 @@ class AIAgent:
     for AI models that support function calling.
     """
 
+    _explicit_owner_source: bool
     _TOOL_CALL_ARGUMENTS_CORRUPTION_MARKER = (
         "[hermes-agent: tool call arguments were corrupted in this session and "
         "have been dropped to keep the conversation alive. See issue #15236.]"
@@ -480,6 +481,7 @@ class AIAgent:
         platform: str = None,
         user_id: str = None,
         user_id_alt: str = None,
+        explicit_owner_source: bool = False,
         user_name: str = None,
         chat_id: str = None,
         chat_name: str = None,
@@ -558,6 +560,7 @@ class AIAgent:
             platform=platform,
             user_id=user_id,
             user_id_alt=user_id_alt,
+            explicit_owner_source=explicit_owner_source,
             user_name=user_name,
             chat_id=chat_id,
             chat_name=chat_name,
@@ -6462,13 +6465,43 @@ class AIAgent:
         ``force=False``.
         """
         from agent.conversation_compression import compress_context
-        return compress_context(
-            self, messages, system_message,
-            approx_tokens=approx_tokens, task_id=task_id, focus_topic=focus_topic,
-            force=force,
-            defer_context_engine_notification=defer_context_engine_notification,
-            commit_fence=commit_fence,
+        from agent.portal_tags import (
+            get_conversation_context,
+            reset_conversation_context,
+            set_conversation_context,
         )
+        # Out-of-turn compaction entry points — ``/compact`` (cli.py), the
+        # gateway ``/compress`` command and its hygiene sweep (both of which
+        # build a throwaway agent), and partial head compression — call this
+        # forwarder directly, outside ``run_conversation``'s ambient scope.
+        # With nothing ambient the summarizer's auxiliary call carries no
+        # conversation tag and no Portal sticky key, so it routes independently
+        # of the conversation it belongs to. Publish the root here as a
+        # fallback; in-turn callers already have it set to the same value, so
+        # this is a no-op for them.
+        #
+        # Note this does NOT keep the compaction turn's own prompt cache warm:
+        # compaction replaces the history with a summary and rebuilds the
+        # system prompt, so that request is a cold write on any endpoint. What
+        # it buys is the turns AFTER compaction reading the cache it wrote.
+        token = None
+        if get_conversation_context() is None:
+            root = self._conversation_root_id()
+            if root:
+                token = set_conversation_context(root)
+        try:
+            return compress_context(
+                self, messages, system_message,
+                approx_tokens=approx_tokens, task_id=task_id, focus_topic=focus_topic,
+                force=force,
+                defer_context_engine_notification=defer_context_engine_notification,
+                commit_fence=commit_fence,
+            )
+        finally:
+            # Restore whatever the caller had, so a compaction never leaks its
+            # tag into the surrounding scope.
+            if token is not None:
+                reset_conversation_context(token)
 
     def _set_tool_guardrail_halt(self, decision: ToolGuardrailDecision) -> None:
         """Record the first guardrail decision that should stop this turn."""
@@ -6581,6 +6614,8 @@ class AIAgent:
             max_iterations=function_args.get("max_iterations"),
             role=function_args.get("role"),
             background=(not _is_subagent),
+            model=function_args.get("model"),
+            provider=function_args.get("provider"),
             parent_agent=self,
         )
 

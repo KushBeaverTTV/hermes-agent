@@ -20,6 +20,7 @@ import pytest
 
 import gateway.run as gateway_run
 from gateway.platforms.base import MessageEvent, MessageType
+from gateway import restart as gateway_restart
 from gateway.restart import EXTERNAL_GATEWAY_SUPERVISOR_ENV
 from tests.gateway.restart_test_helpers import make_restart_runner, make_restart_source
 
@@ -40,6 +41,12 @@ def _make_runner_with_mock_restart(tmp_path, monkeypatch):
     monkeypatch.delenv("XPC_SERVICE_NAME", raising=False)
     monkeypatch.delenv("HERMES_S6_SUPERVISED_CHILD", raising=False)
     monkeypatch.delenv(EXTERNAL_GATEWAY_SUPERVISOR_ENV, raising=False)
+    detect_restart_manager = gateway_restart.is_gateway_restart_managed
+    monkeypatch.setattr(
+        gateway_restart,
+        "is_gateway_restart_managed",
+        lambda environ=None: detect_restart_manager(environ, containerized=False),
+    )
     runner, _adapter = make_restart_runner()
     runner.request_restart = MagicMock(return_value=True)
     return runner

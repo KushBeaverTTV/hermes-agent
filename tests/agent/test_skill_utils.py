@@ -165,11 +165,18 @@ def test_skill_config_raw_cache_invalidates_on_config_edit(tmp_path, monkeypatch
 
     monkeypatch.setenv("HERMES_HOME", str(hermes_home))
     skill_utils._external_dirs_cache_clear()
+    # Hermetic: drop the raw config cache under test so a stale entry left by
+    # another test in the shared suite cannot mask the invalidation behavior.
+    skill_utils._raw_config_cache_clear()
     assert get_disabled_skill_names() == {"old-skill"}
 
     config_path.write_text("skills:\n  disabled: [new-skill]\n", encoding="utf-8")
     import os
-    os.utime(config_path, None)
+    # Force a distinguishable mtime: os.utime(None) can land within the same
+    # nanosecond tick as the first write under some filesystems/CI, leaving the
+    # (path, mtime_ns, size) cache key unchanged and the edit invisible.
+    bumped = config_path.stat().st_mtime_ns + 1_000_000
+    os.utime(config_path, ns=(bumped, bumped))
 
     assert get_disabled_skill_names() == {"new-skill"}
 

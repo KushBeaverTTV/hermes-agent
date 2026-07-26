@@ -30,6 +30,9 @@ def fake_homes(tmp_path, monkeypatch):
     profile = root / "profiles" / "work"
     profile.mkdir(parents=True)
     monkeypatch.setenv("HERMES_HOME", str(profile))
+    # Verify the transcript denylist independently of an operator-level
+    # workspace sandbox inherited by the pytest process.
+    monkeypatch.delenv("HERMES_WRITE_SAFE_ROOT", raising=False)
     return root, profile
 
 

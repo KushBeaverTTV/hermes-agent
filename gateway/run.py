@@ -69,6 +69,7 @@ from agent.conversation_loop import INTERRUPT_WAITING_FOR_MODEL_PREFIX
 from agent.i18n import t
 from hermes_cli.config import cfg_get
 from hermes_cli.fallback_config import get_fallback_chain
+from gateway.readiness import remove_gateway_readiness, write_gateway_readiness
 
 # --- Agent cache tuning ---------------------------------------------------
 # Bounds the per-session AIAgent cache to prevent unbounded growth in
@@ -6082,6 +6083,68 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
         self._enqueue_fifo(session_key, event, adapter)
 
+    def _is_explicit_owner_event(self, event: MessageEvent) -> bool:
+        """Return whether *event* is external, text-only exact-owner control."""
+        return (
+            not bool(getattr(event, "internal", False))
+            and event.message_type == MessageType.TEXT
+            and bool((event.text or "").strip())
+            and not event.media_urls
+            and not event.media_types
+            and self._is_explicit_owner_source(event.source)
+        )
+
+    def _preempt_busy_queue_with_owner_event(
+        self,
+        session_key: str,
+        event: MessageEvent,
+        *,
+        adapter: Any = None,
+    ) -> bool:
+        """Install an exact-owner text event as the next standalone turn.
+
+        Ordinary busy queueing appends, merges media bursts, and drops the new
+        event at the cap. Owner supersession must do none of those: the owner
+        event becomes the head slot, existing work moves behind it in FIFO
+        order, and a full queue sacrifices its stale tail instead.
+        """
+        if adapter is None:
+            adapter = self._adapter_for_source(event.source)
+        pending_slot = getattr(adapter, "_pending_messages", None) if adapter else None
+        if not isinstance(pending_slot, dict):
+            logger.error(
+                "Cannot install exact-owner turn for session %s: adapter pending slot unavailable.",
+                session_key,
+            )
+            return False
+
+        queued_events = getattr(self, "_queued_events", None)
+        if queued_events is None:
+            queued_events = {}
+            self._queued_events = queued_events
+
+        stale_events = []
+        if session_key in pending_slot:
+            stale_events.append(pending_slot[session_key])
+        stale_events.extend(queued_events.get(session_key, []))
+
+        max_stale = self._BUSY_QUEUE_MAX_PENDING - 1
+        dropped = stale_events[max_stale:]
+        preserved = stale_events[:max_stale]
+        pending_slot[session_key] = event
+        if preserved:
+            queued_events[session_key] = preserved
+        else:
+            queued_events.pop(session_key, None)
+        if dropped:
+            logger.warning(
+                "Exact-owner turn preempted full busy queue for session %s; "
+                "discarded %d stale tail event(s).",
+                session_key,
+                len(dropped),
+            )
+        return True
+
     async def _handle_active_session_busy_message(self, event: MessageEvent, session_key: str) -> bool:
         # --- Authorization gate (#17775) ---
         # The cold path (_handle_message) checks _is_user_authorized before
@@ -6099,6 +6162,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             )
             return True  # handled (silently dropped); do not fall through
 
+        explicit_owner = self._is_explicit_owner_event(event)
+
         # --- Draining case (gateway restarting/stopping) ---
         if self._draining:
             adapter = self._adapter_for_source(event.source)
@@ -6108,7 +6173,16 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             reply_anchor = self._reply_anchor_for_event(event)
             thread_meta = self._thread_metadata_for_source(event.source, reply_anchor)
             if self._queue_during_drain_enabled():
-                self._queue_or_replace_pending_event(session_key, event)
+                if explicit_owner:
+                    installed = self._preempt_busy_queue_with_owner_event(
+                        session_key,
+                        event,
+                        adapter=adapter,
+                    )
+                    if not installed:
+                        self._queue_or_replace_pending_event(session_key, event)
+                else:
+                    self._queue_or_replace_pending_event(session_key, event)
                 message = f"⏳ Gateway {self._status_action_gerund()} — queued for the next turn after it comes back."
             else:
                 message = f"⏳ Gateway is {self._status_action_gerund()} and is not accepting another turn right now."
@@ -6223,12 +6297,13 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
         running_agent = self._running_agents.get(session_key)
 
-        effective_mode = self._busy_input_mode
+        effective_mode = "interrupt" if explicit_owner else self._busy_input_mode
         busy_text_mode = getattr(self, "_busy_text_mode", "interrupt")
         if (
             event.message_type == MessageType.TEXT
             and busy_text_mode == "queue"
             and effective_mode != "steer"
+            and not explicit_owner
         ):
             return False
 
@@ -6246,6 +6321,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # operator still has a way to force-cancel everything.
         demoted_for_subagents = (
             effective_mode == "interrupt"
+            and not explicit_owner
             and self._agent_has_active_subagents(running_agent)
         )
         if demoted_for_subagents:
@@ -6257,6 +6333,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             effective_mode = "queue"
         demoted_for_compression = (
             effective_mode == "interrupt"
+            and not explicit_owner
             and await self._session_has_compression_in_flight(session_key)
         )
         if demoted_for_compression:
@@ -6290,6 +6367,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 effective_mode = "queue"
         elif (
             effective_mode == "interrupt"
+            and not explicit_owner
             and event.message_type == MessageType.TEXT
             and not event.media_urls
             and not event.media_types
@@ -6319,7 +6397,16 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # turn (#43066 sub-bug 2). The FIFO path gives each text its own
         # turn in arrival order while still preserving photo-burst / album
         # merge semantics for media.
-        if not steered and not redirected:
+        owner_turn_installed = False
+        if explicit_owner:
+            owner_turn_installed = self._preempt_busy_queue_with_owner_event(
+                session_key,
+                event,
+                adapter=adapter,
+            )
+            if not owner_turn_installed:
+                self._queue_or_replace_pending_event(session_key, event)
+        elif not steered and not redirected:
             self._queue_or_replace_pending_event(session_key, event)
 
         is_queue_mode = effective_mode == "queue"
@@ -6332,6 +6419,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         if (
             effective_mode == "interrupt"
             and not redirected
+            and (not explicit_owner or owner_turn_installed)
             and running_agent
             and running_agent is not _AGENT_PENDING_SENTINEL
         ):
@@ -11413,6 +11501,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     f"mid-turn. Wait for the current response or `/stop` first."
                 )
 
+            _explicit_owner = self._is_explicit_owner_event(event)
+
             if event.message_type == MessageType.PHOTO:
                 logger.debug("PRIORITY photo follow-up for session %s — queueing without interrupt", _quick_key)
                 adapter = self._adapter_for_source(source)
@@ -11427,6 +11517,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             if (
                 source.platform == Platform.TELEGRAM
                 and event.message_type == MessageType.TEXT
+                and not _explicit_owner
                 and _telegram_followup_grace > 0
                 and _started_at
                 and (time.time() - _started_at) <= _telegram_followup_grace
@@ -11450,13 +11541,40 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 return None
 
             running_agent = self._running_agents.get(_quick_key)
+            if (
+                running_agent is _AGENT_PENDING_SENTINEL
+                and event.get_command() == "stop"
+            ):
+                # Force-clean the sentinel so the session is unlocked.
+                self._release_running_agent_state(_quick_key)
+                logger.info("HARD STOP (pending) for session %s — sentinel cleared", _quick_key)
+                return EphemeralReply("⚡ Force-stopped. The agent was still starting — session unlocked.")
+            if self._draining:
+                if self._queue_during_drain_enabled():
+                    if _explicit_owner:
+                        installed = self._preempt_busy_queue_with_owner_event(
+                            _quick_key, event
+                        )
+                        if not installed:
+                            self._queue_or_replace_pending_event(_quick_key, event)
+                    else:
+                        self._queue_or_replace_pending_event(_quick_key, event)
+                return (
+                    f"⏳ Gateway {self._status_action_gerund()} — queued for the next turn after it comes back."
+                    if self._queue_during_drain_enabled()
+                    else f"⏳ Gateway is {self._status_action_gerund()} and is not accepting another turn right now."
+                )
             if running_agent is _AGENT_PENDING_SENTINEL:
                 # Agent is being set up but not ready yet.
-                if event.get_command() == "stop":
-                    # Force-clean the sentinel so the session is unlocked.
-                    self._release_running_agent_state(_quick_key)
-                    logger.info("HARD STOP (pending) for session %s — sentinel cleared", _quick_key)
-                    return EphemeralReply("⚡ Force-stopped. The agent was still starting — session unlocked.")
+                if _explicit_owner:
+                    # The startup sentinel cannot be interrupted, but an exact
+                    # owner turn must still become the next standalone event.
+                    installed = self._preempt_busy_queue_with_owner_event(
+                        _quick_key, event
+                    )
+                    if not installed:
+                        self._queue_or_replace_pending_event(_quick_key, event)
+                    return None
                 # Queue the message so it will be picked up after the
                 # agent starts.
                 adapter = self._adapter_for_source(source)
@@ -11468,14 +11586,30 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         merge_text=True,
                     )
                 return None
-            if self._draining:
-                if self._queue_during_drain_enabled():
-                    self._queue_or_replace_pending_event(_quick_key, event)
-                return (
-                    f"⏳ Gateway {self._status_action_gerund()} — queued for the next turn after it comes back."
-                    if self._queue_during_drain_enabled()
-                    else f"⏳ Gateway is {self._status_action_gerund()} and is not accepting another turn right now."
+            if _explicit_owner:
+                # Owner directions are next-turn control, never stale-turn
+                # steering. Preserve a real user-message boundary before
+                # interrupting, and bypass ordinary queue/steer/subagent/
+                # compression/redirect demotions.
+                owner_turn_installed = self._preempt_busy_queue_with_owner_event(
+                    _quick_key,
+                    event,
                 )
+                if not owner_turn_installed:
+                    self._queue_or_replace_pending_event(_quick_key, event)
+                if (
+                    owner_turn_installed
+                    and running_agent
+                    and running_agent is not _AGENT_PENDING_SENTINEL
+                ):
+                    try:
+                        running_agent.interrupt(event.text)
+                    except Exception:
+                        logger.exception(
+                            "Exact-owner PRIORITY interrupt failed for session %s",
+                            _quick_key,
+                        )
+                return None
             if self._busy_input_mode == "queue":
                 logger.debug("PRIORITY queue follow-up for session %s", _quick_key)
                 self._queue_or_replace_pending_event(_quick_key, event)
@@ -21645,6 +21779,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     platform=platform_key,
                     user_id=source.user_id,
                     user_id_alt=source.user_id_alt,
+                    explicit_owner_source=self._is_explicit_owner_source(source),
                     user_name=source.user_name,
                     chat_id=source.chat_id,
                     chat_name=source.chat_name,
@@ -21667,6 +21802,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         )
                         self._enforce_agent_cache_cap()
                 logger.debug("Created new agent for session %s (sig=%s)", session_key, _sig)
+
+            # Refresh on every turn, including cached agents. This delegates the
+            # decision to the gateway's profile-aware, primary-user-id predicate.
+            agent._explicit_owner_source = self._is_explicit_owner_source(source)
 
             # Per-message state — callbacks and reasoning config change every
             # turn and must not be baked into the cached agent constructor.
@@ -24315,8 +24454,11 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
     if callable(start_watchdog):
         start_watchdog()
 
-    # Wait for shutdown
-    await runner.wait_for_shutdown()
+    write_gateway_readiness(adapters=runner.adapters)
+    try:
+        await runner.wait_for_shutdown()
+    finally:
+        remove_gateway_readiness()
 
     try:
         from hermes_cli.nous_auth_keepalive import stop_nous_auth_keepalive

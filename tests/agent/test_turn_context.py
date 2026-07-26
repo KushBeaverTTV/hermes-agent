@@ -512,3 +512,44 @@ def test_expired_cooldown_allows_preflight(tmp_path):
     assert isinstance(ctx, TurnContext)
     agent._emit_status.assert_called_once()
     agent._compress_context.assert_called()
+
+
+def test_owner_directive_capture_receives_clean_persisted_message():
+    agent = _FakeAgent()
+    captured = MagicMock(return_value={"recorded": True})
+    with patch(
+        "agent.owner_directive_capture.capture_owner_directive", captured
+    ):
+        _build(
+            agent,
+            user_message="API-only wrapper text",
+            persist_user_message="Never restart the gateway casually.",
+        )
+
+    captured.assert_called_once()
+    called_agent, called_message = captured.call_args.args
+    assert called_agent is agent
+    assert called_message == "Never restart the gateway casually."
+    assert captured.call_args.kwargs["turn_id"] == agent._current_turn_id
+
+
+def test_owner_authority_prompt_is_system_only_not_persisted_user_content():
+    agent = _FakeAgent()
+    authority = "<owner-authority>Newest owner rule.</owner-authority>"
+    with patch(
+        "agent.owner_directive_capture.capture_owner_directive",
+        return_value={"recorded": True},
+    ), patch(
+        "agent.owner_directive_capture.build_owner_authority_prompt",
+        return_value=authority,
+    ):
+        ctx = _build(
+            agent,
+            user_message="Continue your work.",
+            persist_user_message="Continue your work.",
+        )
+
+    assert ctx.active_system_prompt == "SYSTEM\n\n" + authority
+    assert ctx.original_user_message == "Continue your work."
+    assert ctx.messages[ctx.current_turn_user_idx]["content"] == "Continue your work."
+    assert authority not in str(ctx.messages[ctx.current_turn_user_idx])

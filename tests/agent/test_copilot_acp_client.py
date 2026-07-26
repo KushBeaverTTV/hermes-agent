@@ -20,6 +20,14 @@ class _FakeProcess:
 
 class CopilotACPClientSafetyTests(unittest.TestCase):
     def setUp(self) -> None:
+        # The suite may run under an operator-level write sandbox. These tests
+        # provide their own temp cwd boundary and test safe-root policy
+        # explicitly below, so isolate that ambient setting here.
+        self._safe_root_patcher = patch.dict(
+            os.environ, {"HERMES_WRITE_SAFE_ROOT": ""}, clear=False
+        )
+        self._safe_root_patcher.start()
+        self.addCleanup(self._safe_root_patcher.stop)
         self.client = CopilotACPClient(acp_cwd="/tmp")
 
     def test_extracted_tool_calls_match_openai_sdk_shape(self) -> None:
@@ -370,6 +378,7 @@ def test_run_prompt_preserves_real_home_when_profile_home_available(monkeypatch,
 
     monkeypatch.setenv("HOME", str(real_home))
     monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    monkeypatch.delenv("HERMES_REAL_HOME", raising=False)
 
     captured = {}
     client = _make_home_client(tmp_path)
@@ -395,3 +404,21 @@ def test_run_prompt_passes_home_when_parent_env_is_clean(monkeypatch, tmp_path):
 
     assert "env" in captured["kwargs"]
     assert captured["kwargs"]["env"]["HOME"]
+
+
+def test_run_prompt_prefers_real_home_marker_over_profile_home(monkeypatch, tmp_path):
+    profile_home = tmp_path / "profile-home"
+    real_home = tmp_path / "real-home"
+    profile_home.mkdir()
+    real_home.mkdir()
+    monkeypatch.setenv("HOME", str(profile_home))
+    monkeypatch.setenv("HERMES_REAL_HOME", str(real_home))
+
+    captured = {}
+    client = _make_home_client(tmp_path)
+    with _patch("agent.copilot_acp_client.subprocess.Popen", side_effect=_fake_popen_capture(captured)):
+        with pytest.raises(RuntimeError, match="Could not start Copilot ACP command"):
+            client._run_prompt("hello", timeout_seconds=1)
+
+    assert captured["kwargs"]["env"]["HOME"] == str(real_home)
+    assert captured["kwargs"]["env"]["HERMES_REAL_HOME"] == str(real_home)

@@ -273,6 +273,9 @@ def test_edit_without_prior_evidence_stays_unverified(tmp_path, monkeypatch):
 
 def test_file_tool_stales_evidence_by_session_id_for_absolute_edit(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+    # Keep the write inside the hosted safe-root policy when that policy is
+    # inherited from the test runner (for example, /opt/data in Docker).
+    monkeypatch.setenv("HERMES_WRITE_SAFE_ROOT", str(tmp_path))
     _node_project(tmp_path)
     target = tmp_path / "src" / "app.ts"
     target.parent.mkdir()

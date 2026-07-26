@@ -47,10 +47,16 @@ ui-tui/packages/hermes-ink/dist/
 *.swp
 *.swo
 
-# Testing
+# Testing and local proof output
 .pytest_cache/
 .coverage
 htmlcov/
+.hermes/
+*.log
+*.db
+*.sqlite
+*.sqlite3
+auth.json
 
 # Documentation
 *.md

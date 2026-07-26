@@ -132,6 +132,10 @@ async def test_restart_command_uses_detached_without_systemd(tmp_path, monkeypat
     """Without systemd, /restart uses the detached subprocess approach."""
     monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
     monkeypatch.delenv("INVOCATION_ID", raising=False)
+    monkeypatch.setattr(
+        "gateway.restart.is_gateway_restart_managed",
+        lambda environ=None: False,
+    )
 
     runner, _adapter = make_restart_runner()
     runner.request_restart = MagicMock(return_value=True)

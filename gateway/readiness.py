@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import json
+import os
 import shutil
 import sqlite3
+import time
 from contextlib import closing
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -14,6 +18,89 @@ from hermes_constants import get_hermes_home
 
 
 _DISK_DEGRADED_PERCENT = 90.0
+
+
+def get_process_start_time(pid: int, proc_root: Path = Path("/proc")) -> str:
+    """Return Linux /proc stat field 22 for PID-reuse-safe identity."""
+
+    stat = (proc_root / str(pid) / "stat").read_text(encoding="utf-8")
+    close = stat.rfind(")")
+    if close < 0:
+        raise ValueError("malformed proc stat")
+    fields = stat[close + 2 :].split()
+    if len(fields) < 20:
+        raise ValueError("proc stat lacks process start time")
+    return fields[19]
+
+
+def _gateway_ready_path(home: Path | None = None) -> Path:
+    return (home if home is not None else get_hermes_home()) / "gateway.ready.json"
+
+
+def read_gateway_readiness(path: Path) -> dict[str, Any] | None:
+    """Read and minimally validate a readiness marker without raising."""
+
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    if not isinstance(payload.get("pid"), int):
+        return None
+    if not str(payload.get("process_start_time") or ""):
+        return None
+    return payload
+
+
+def write_gateway_readiness(
+    *,
+    adapters: Mapping[Any, Any] | None = None,
+    home: Path | None = None,
+) -> Path:
+    """Atomically publish that the initialized gateway reached its run loop."""
+
+    pid = os.getpid()
+    marker = _gateway_ready_path(home)
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "pid": pid,
+        "process_start_time": get_process_start_time(pid),
+        "ready_at_unix": int(time.time()),
+        "adapters": sorted(
+            str(getattr(key, "value", key)) for key in (adapters or {}).keys()
+        ),
+    }
+    temporary = marker.with_name(f".{marker.name}.{pid}.tmp")
+    temporary.write_text(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+    temporary.chmod(0o600)
+    temporary.replace(marker)
+    marker.chmod(0o600)
+    return marker
+
+
+def remove_gateway_readiness(*, home: Path | None = None) -> bool:
+    """Remove only this process's marker, never a replacement's marker."""
+
+    marker = _gateway_ready_path(home)
+    payload = read_gateway_readiness(marker)
+    if payload is None:
+        return False
+    pid = os.getpid()
+    try:
+        start_time = get_process_start_time(pid)
+    except (OSError, ValueError):
+        return False
+    if payload.get("pid") != pid or payload.get("process_start_time") != start_time:
+        return False
+    try:
+        marker.unlink()
+    except FileNotFoundError:
+        return False
+    return True
 
 
 def _check(status: str, detail: str | None = None, **extra: Any) -> dict[str, Any]:
@@ -119,4 +206,10 @@ def collect_runtime_readiness(
     return {"status": overall, "checks": checks}
 
 
-__all__ = ["collect_runtime_readiness"]
+__all__ = [
+    "collect_runtime_readiness",
+    "get_process_start_time",
+    "read_gateway_readiness",
+    "remove_gateway_readiness",
+    "write_gateway_readiness",
+]

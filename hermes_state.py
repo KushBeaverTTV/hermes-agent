@@ -532,6 +532,17 @@ def apply_wal_with_fallback(
     (prefer DELETE).  If the on-disk DB is already WAL, keep WAL and warn
     — never live-downgrade under possible concurrent openers.
 
+    This gate (#70055) is deliberately RETAINED. An earlier revision of the
+    lock-cancellation fix (#71724) reverted it on the theory that DELETE was
+    "the mode that corrupts", but that comparison was confounded: the clean
+    WAL result came from SQLite 3.53.1, which carries BOTH the WAL-reset fix
+    AND 3.51.0's defenses against close()-broken POSIX locks, so it says
+    nothing about 3.50.4.  Re-measured on the actually-bundled 3.50.4 with
+    the lock fix in place, WAL and DELETE are both clean (0/3 each) — i.e.
+    there is no evidence that WAL is safer here, and upstream still documents
+    the WAL-reset bug as real through 3.51.2 with serious consequences.  Until
+    a fixed runtime is delivered, keep new databases out of WAL.
+
     The WARNING is deduplicated per ``db_label``: repeated connections
     to the same underlying DB (e.g. kanban_db.connect() which is called
     on every kanban operation) log once per process, not once per call.
@@ -731,9 +742,29 @@ def _backup_db_file(db_path: Path) -> Optional[Path]:
     Raw file copy on purpose: the DB won't open cleanly, so we preserve the
     bytes exactly for forensics / manual restore. WAL and SHM sidecars are
     copied too when present. Returns the backup path, or None on failure.
+
+    Refuses when a connection to this database is still live in the process:
+    reading the file would ``close()`` a descriptor for it and cancel that
+    connection's POSIX advisory locks (see ``hermes_cli.sqlite_safe_read``).
+    The repair path can be entered by one SessionDB while the gateway holds
+    others, so this is a real possibility rather than a theoretical one.
     """
     import datetime
     import shutil
+
+    try:
+        from hermes_cli.sqlite_safe_read import has_live_connection
+    except ImportError:
+        has_live_connection = None  # type: ignore[assignment]
+
+    if has_live_connection is not None and has_live_connection(db_path):
+        logger.error(
+            "Refusing to raw-copy %s for backup: a connection to it is still "
+            "open in this process and the copy would cancel that connection's "
+            "POSIX locks. Close all SessionDB handles first.",
+            db_path,
+        )
+        return None
 
     stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     backup_path = db_path.with_name(f"{db_path.name}.malformed-backup-{stamp}")
@@ -897,7 +928,9 @@ def repair_state_db_schema(db_path: Path, *, backup: bool = True) -> Dict[str, A
          canonical ``messages`` table.
 
     Canonical ``sessions`` / ``messages`` rows are never modified. A
-    timestamped raw backup is taken first unless ``backup=False``.
+    timestamped raw backup is taken first unless ``backup=False``; when a
+    requested backup cannot be created, repair fails closed before modifying
+    the database.
 
     Returns a report dict: ``{repaired: bool, strategy: str|None,
     backup_path: str|None, error: str|None}``.
@@ -921,7 +954,13 @@ def repair_state_db_schema(db_path: Path, *, backup: bool = True) -> Dict[str, A
 
     if backup:
         bpath = _backup_db_file(db_path)
-        report["backup_path"] = str(bpath) if bpath else None
+        if bpath is None:
+            report["error"] = (
+                "Requested backup could not be created; refusing to modify "
+                f"{db_path}"
+            )
+            return report
+        report["backup_path"] = str(bpath)
 
     # ── Strategy 0: rebuild FTS indexes in place (FTS write-corruption) ──
     # The FTS5 'rebuild' command rewrites the internal index from the canonical
@@ -1576,8 +1615,53 @@ class CompressionSessionBusyError(RuntimeError):
     """A non-owner tried to write while compression owns the session."""
 
 
-def is_zeroed_state_db(path: Path, *, probe_bytes: int = 100) -> bool:
+def _connect_tracked_db(path, tracking_path=None, **kwargs):
+    """``sqlite3.connect`` that registers the open fd for lock-safety.
+
+    While a connection is live, byte-level probes of the same file are
+    refused: an ``open()``/``close()`` cancels every POSIX advisory lock this
+    process holds on it -- including a running VACUUM's EXCLUSIVE lock.
+    Released automatically on ``close()``.
+
+    The ONLY tolerated fallback is the helper being absent entirely
+    (scaffold/embed installs that ship hermes_state without hermes_cli). A
+    real connection failure must propagate: silently retrying an *untracked*
+    connect would disable the guard for the lifetime of that connection,
+    which is precisely the failure mode this module exists to prevent.
+    """
+    try:
+        from hermes_cli.sqlite_safe_read import connect_tracked
+    except ImportError:
+        logger.debug(
+            "hermes_cli.sqlite_safe_read unavailable; opening %s untracked "
+            "(byte-probe guard inactive in this install)",
+            path,
+        )
+        return sqlite3.connect(str(path), **kwargs)
+
+    # Open through THIS module's sqlite3.connect so callers (and tests) that
+    # patch hermes_state.sqlite3.connect keep control of connection creation;
+    # the helper still owns tracking.
+    return connect_tracked(
+        path,
+        tracking_path=tracking_path,
+        connect_fn=sqlite3.connect,
+        **kwargs,
+    )
+
+
+def is_zeroed_state_db(
+    path: Path, *, probe_bytes: int = 100, force: bool = False
+) -> bool:
     """Detect the #68474 zeroed state.db signature (size>0, NUL header).
+
+    Byte-level probe, so it is only safe BEFORE any connection to *path*
+    exists in this process: ``close()`` cancels every POSIX advisory lock the
+    process holds on the file, which can pull the EXCLUSIVE lock out from
+    under a running VACUUM and corrupt the database. The read is routed
+    through ``read_header_bytes_preopen``, which refuses (returning False
+    here) once a connection is live. Pass ``force=True`` only for offline
+    files -- quarantined copies, snapshots, archives.
 
     Prefer ``hermes_cli.backup.is_zeroed_sqlite_file`` when available; this
     local copy keeps SessionDB openable without importing the CLI package
@@ -1586,7 +1670,7 @@ def is_zeroed_state_db(path: Path, *, probe_bytes: int = 100) -> bool:
     try:
         from hermes_cli.backup import is_zeroed_sqlite_file
 
-        return is_zeroed_sqlite_file(path, probe_bytes=probe_bytes)
+        return is_zeroed_sqlite_file(path, probe_bytes=probe_bytes, force=force)
     except Exception:
         pass
     try:
@@ -1596,10 +1680,17 @@ def is_zeroed_state_db(path: Path, *, probe_bytes: int = 100) -> bool:
     if size <= 0:
         return False
     try:
-        with open(path, "rb") as fh:
-            head = fh.read(max(16, probe_bytes))
-    except OSError:
+        from hermes_cli.sqlite_safe_read import read_header_bytes_preopen
+    except ImportError:
+        logger.debug(
+            "hermes_cli.sqlite_safe_read unavailable; skipping zeroed-file byte probe for %s",
+            path,
+        )
         return False
+
+    head = read_header_bytes_preopen(
+        path, length=max(16, probe_bytes), force=force
+    )
     if not head or head.startswith(b"SQLite format 3"):
         return False
     return all(byte == 0 for byte in head)
@@ -1793,8 +1884,9 @@ class SessionDB:
                 # must already exist + be initialised (callers guard on
                 # db_path.exists()); a SELECT against an empty file raises and
                 # the caller degrades per-profile.
-                self._conn = sqlite3.connect(
+                self._conn = _connect_tracked_db(
                     f"file:{self.db_path}?mode=ro",
+                    tracking_path=self.db_path,
                     uri=True,
                     check_same_thread=False,
                     timeout=1.0,
@@ -1835,7 +1927,7 @@ class SessionDB:
                     raise sqlite3.DatabaseError(msg)
 
             def _connect_and_init():
-                self._conn = sqlite3.connect(
+                self._conn = _connect_tracked_db(
                     str(self.db_path),
                     check_same_thread=False,
                     # Short timeout — application-level retry with random
@@ -1899,6 +1991,16 @@ class SessionDB:
             # cause that another thread's /resume is about to format.
             # Tests that need to reset the state can call
             # ``hermes_state._set_last_init_error(None)`` explicitly.
+            # Ensure every failed initialization releases its tracked SQLite
+            # connection before the exception escapes. Leaving it registered
+            # would make future safe header probes fail closed forever.
+            conn = self._conn
+            self._conn = None
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    logger.exception("Failed to close state.db after initialization error")
             _set_last_init_error(f"{type(exc).__name__}: {exc}")
             raise
 

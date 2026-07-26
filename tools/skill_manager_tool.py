@@ -380,25 +380,46 @@ def _background_review_write_guard(
                     f"skill '{name}'."
                 ),
             }
-        # Manually authored skills (created_by != "agent") are off-limits
-        # to autonomous curation. This prevents the LLM consolidation pass
-        # from archiving skills the user placed manually (e.g. via URL
-        # install or direct SKILL.md authoring), which lack the
-        # `created_by: "agent"` marker.
+        # Skills that are not curator-managed are off-limits to autonomous
+        # curation. This prevents the LLM consolidation pass from mutating
+        # skills the user owns (manually authored, URL-installed, or created by
+        # a foreground `skill_manage(create)` at the user's request), which lack
+        # the `created_by: "agent"` marker.
+        #
+        # A MISSING record and an explicit `created_by: null` must resolve
+        # IDENTICALLY (issue #67140). Keying on `isinstance(usage_rec, dict)`
+        # made the policy depend on the guard's own side effect: a local skill
+        # with no telemetry record passed, the successful write called
+        # bump_patch() which created a `created_by: null` record, and the very
+        # same write was refused from then on. "Allowed exactly once" is not a
+        # policy — it is a race with our own bookkeeping. Fail closed for both
+        # shapes; `hermes curator adopt <name>` is the supported way in.
         usage_data = skill_usage.load_usage()
         usage_rec = usage_data.get(name)
-        if isinstance(usage_rec, dict) and not skill_usage._is_curator_managed_record(usage_rec):
+        if not skill_usage._is_curator_managed_record(usage_rec):
+            if isinstance(usage_rec, dict):
+                _detail = f"created_by={usage_rec.get('created_by')!r}"
+            else:
+                _detail = "no usage record"
             return {
                 "success": False,
                 "error": (
                     f"Refusing background curator {action} for skill "
-                    f"'{name}': the skill records show it is not agent-created "
-                    f"(created_by={usage_rec.get('created_by')!r}). Manually authored "
-                    f"skills are off-limits to autonomous curation."
+                    f"'{name}': the skill is not curator-managed ({_detail}). "
+                    "User-owned skills are off-limits to autonomous curation. "
+                    f"Run `hermes curator adopt {name}` to opt it in."
                 ),
             }
     except Exception:
-        logger.debug("owned skill guard lookup failed for %s", name, exc_info=True)
+        logger.warning("owned skill guard lookup failed for %s", name, exc_info=True)
+        return {
+            "success": False,
+            "error": (
+                f"Refusing background curator {action} for skill '{name}': "
+                "agent ownership could not be verified because the provenance "
+                "record is unavailable or unreadable."
+            ),
+        }
     return None
 
 
@@ -1351,6 +1372,89 @@ def _apply_skill_write_gate(action, name, **payload_kwargs):
     )
 
 
+def _skill_authority_candidate(
+    action: str,
+    name: str,
+    *,
+    content: Optional[str] = None,
+    file_path: Optional[str] = None,
+    file_content: Optional[str] = None,
+    old_string: Optional[str] = None,
+    new_string: Optional[str] = None,
+) -> str:
+    """Describe the effective guidance mutation for the shared authority gate."""
+    if action in {"create", "edit"}:
+        return content or ""
+    if action == "patch":
+        if new_string:
+            return new_string
+        return f"Stop following and remove this guidance: {old_string or ''}"
+    if action == "write_file":
+        return file_content or ""
+
+    existing = _find_skill(name)
+    if not existing:
+        return ""
+    target = existing["path"] / "SKILL.md"
+    if action == "remove_file" and file_path:
+        resolved, error = _resolve_skill_target(existing["path"], file_path)
+        if not error and resolved is not None:
+            target = resolved
+    try:
+        existing_text = target.read_text(encoding="utf-8")
+    except Exception:
+        existing_text = f"skill {name} guidance"
+    return f"Stop following and remove this guidance: {existing_text}"
+
+
+def _apply_owner_authority_gate(action: str, name: str, **payload_kwargs):
+    """Reject lower-authority skill mutations that contradict owner directives."""
+    if action not in {"create", "edit", "patch", "delete", "write_file", "remove_file"}:
+        return None
+    candidate = _skill_authority_candidate(action, name, **payload_kwargs)
+    if not candidate.strip():
+        return None
+    try:
+        from mnemosyne.authority import check_lower_authority_write
+    except ImportError:
+        return json.dumps(
+            {
+                "success": False,
+                "error": "Skill mutation rejected because authority checks are unavailable.",
+                "status": "authority_rejected",
+                "_authority_rejected": True,
+                "authority": {
+                    "allowed": False,
+                    "reason": "authority_unavailable",
+                    "source": "skill_manager_tool",
+                },
+            },
+            ensure_ascii=False,
+        )
+
+    try:
+        from tools.write_approval import current_origin
+        source = current_origin()
+    except Exception:
+        source = "skill_manage"
+    decision = check_lower_authority_write(
+        candidate,
+        operation=f"skill_{action}",
+        source=str(source or "skill_manage"),
+    )
+    if decision.allowed:
+        return None
+    return json.dumps(
+        {
+            "success": False,
+            "error": "Skill mutation rejected: it contradicts a newer explicit owner directive.",
+            "_authority_rejected": True,
+            "authority": decision.to_dict(),
+        },
+        ensure_ascii=False,
+    )
+
+
 def apply_skill_pending(payload: Dict[str, Any]) -> str:
     """Replay a staged skill write, bypassing the gate. Returns the tool result
     JSON string. Called by the /skills approve handler.
@@ -1393,6 +1497,18 @@ def skill_manage(
     preflight = _background_review_preflight(action, name)
     if preflight is not None:
         return json.dumps(preflight, ensure_ascii=False)
+
+    authority_result = _apply_owner_authority_gate(
+        action,
+        name,
+        content=content,
+        file_path=file_path,
+        file_content=file_content,
+        old_string=old_string,
+        new_string=new_string,
+    )
+    if authority_result is not None:
+        return authority_result
 
     # Approval gate: when on, stages the write for review (skills are too large
     # to review inline, so they always stage regardless of origin); when off

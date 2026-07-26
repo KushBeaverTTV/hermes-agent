@@ -3,7 +3,7 @@
 import os
 import re
 import unittest
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 
 def _make_author(*, bot: bool = False, is_self: bool = False):
@@ -206,8 +206,11 @@ class TestDiscordBotFilter(unittest.TestCase):
 
     def test_default_is_none(self):
         """Default behavior (no env var) should be 'none'."""
-        default = os.getenv("DISCORD_ALLOW_BOTS", "none")
-        self.assertEqual(default, "none")
+        # The host running the suite may explicitly configure this variable.
+        # Test the stated absent-variable contract in an isolated environment.
+        with patch.dict(os.environ, {}, clear=True):
+            default = os.getenv("DISCORD_ALLOW_BOTS", "none")
+            self.assertEqual(default, "none")
 
     def test_case_insensitive(self):
         """Allow_bots value should be case-insensitive."""

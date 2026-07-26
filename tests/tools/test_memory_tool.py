@@ -3,9 +3,12 @@
 import json
 import pytest
 from pathlib import Path
+from unittest.mock import patch
 
+from mnemosyne.authority import AuthorityDecision
 from tools.memory_tool import (
     MemoryStore,
+    apply_memory_pending,
     memory_tool,
     _scan_memory_content,
     MEMORY_SCHEMA,
@@ -1083,3 +1086,94 @@ class TestLoadTimeSnapshotSanitization:
         # Block marker appears exactly once, not nested
         assert snapshot.count("[BLOCKED:") == 1
         assert "Clean fact" in snapshot
+
+
+def _authority_rejected(operation: str, reason: str) -> AuthorityDecision:
+    return AuthorityDecision(
+        allowed=False,
+        reason=reason,
+        operation=operation,
+        source="memory_tool",
+        directive_id="owner-1",
+        directive="Never restart the Telegram gateway casually.",
+        contradiction=0.99 if "contradicts" in reason else 0.0,
+        entailment=0.99 if "remove" in reason else 0.0,
+    )
+
+
+def test_legacy_memory_add_rejects_before_background_review_write(store):
+    with patch(
+        "mnemosyne.authority.check_lower_authority_write",
+        return_value=_authority_rejected(
+            "legacy_memory_add", "contradicts_explicit_owner_directive"
+        ),
+    ):
+        result = json.loads(memory_tool(
+            action="add",
+            target="memory",
+            content="Restart the Telegram gateway whenever configuration changes.",
+            store=store,
+        ))
+
+    assert result["status"] == "authority_rejected"
+    assert store.memory_entries == []
+
+
+def test_legacy_memory_remove_rejects_before_owner_aligned_entry_delete(store):
+    store.add("memory", "Never restart the Telegram gateway casually.")
+    with patch(
+        "mnemosyne.authority.check_lower_authority_removal",
+        return_value=_authority_rejected(
+            "legacy_memory_remove", "would_remove_owner_aligned_material"
+        ),
+    ):
+        result = json.loads(memory_tool(
+            action="remove",
+            target="memory",
+            old_text="Never restart",
+            store=store,
+        ))
+
+    assert result["status"] == "authority_rejected"
+    assert store.memory_entries == ["Never restart the Telegram gateway casually."]
+
+
+def test_pending_replay_rechecks_authority_before_write(store):
+    payload = {
+        "action": "add",
+        "target": "memory",
+        "content": "Restart the Telegram gateway whenever configuration changes.",
+    }
+    with patch(
+        "mnemosyne.authority.check_lower_authority_write",
+        return_value=_authority_rejected(
+            "legacy_memory_add", "contradicts_explicit_owner_directive"
+        ),
+    ):
+        result = apply_memory_pending(payload, store)
+
+    assert result["status"] == "authority_rejected"
+    assert store.memory_entries == []
+
+
+def test_legacy_memory_rejects_write_when_authority_import_is_unavailable(store):
+    real_import = __import__
+
+    def missing_authority(name, globals=None, locals=None, fromlist=(), level=0):
+        if name == "mnemosyne.authority":
+            raise ImportError("simulated missing authority dependency")
+        return real_import(name, globals, locals, fromlist, level)
+
+    with patch("builtins.__import__", side_effect=missing_authority):
+        result = json.loads(memory_tool(
+            action="add",
+            target="memory",
+            content="Remember this only when authority checks are available.",
+            store=store,
+        ))
+
+    assert result["success"] is False
+    assert result["status"] == "authority_rejected"
+    assert result["_authority_rejected"] is True
+    assert result["authority"]["reason"] == "authority_unavailable"
+    assert store.memory_entries == []

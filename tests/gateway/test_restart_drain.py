@@ -19,6 +19,10 @@ async def test_restart_command_while_busy_requests_drain_without_interrupt(monke
     # Ensure INVOCATION_ID is NOT set — systemd sets this in service mode,
     # which changes the restart call signature.
     monkeypatch.delenv("INVOCATION_ID", raising=False)
+    monkeypatch.setattr(
+        "gateway.restart.is_gateway_restart_managed",
+        lambda environ=None: False,
+    )
     runner, _adapter = make_restart_runner()
     runner.request_restart = MagicMock(return_value=True)
     event = MessageEvent(

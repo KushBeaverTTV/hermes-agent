@@ -1062,6 +1062,75 @@ def _missing_old_text_error(store: "MemoryStore", target: str, action: str) -> s
     )
 
 
+def _authority_rejection_result(decision=None) -> str:
+    authority = (
+        decision.to_dict()
+        if decision is not None
+        else {
+            "allowed": False,
+            "reason": "authority_unavailable",
+            "source": "memory_tool",
+        }
+    )
+    error = (
+        "Memory mutation rejected by a newer explicit owner directive."
+        if decision is not None
+        else "Memory mutation rejected because authority checks are unavailable."
+    )
+    return json.dumps({
+        "success": False,
+        "status": "authority_rejected",
+        "error": error,
+        "_authority_rejected": True,
+        "authority": authority,
+    }, ensure_ascii=False)
+
+
+def _authority_gate_legacy_memory(
+    *,
+    store: MemoryStore,
+    target: str,
+    action: str = None,
+    content: str = None,
+    old_text: str = None,
+    operations: Optional[List[Dict[str, Any]]] = None,
+) -> Optional[str]:
+    """Gate MEMORY.md/USER.md writes, including background-review and replay paths."""
+    try:
+        from mnemosyne.authority import (
+            check_lower_authority_removal,
+            check_lower_authority_write,
+        )
+    except ImportError:
+        return _authority_rejection_result()
+
+    ops = operations or [{"action": action, "content": content, "old_text": old_text}]
+    existing_entries = store._entries_for(target)
+    for op in ops:
+        op_action = str(op.get("action") or "")
+        new_content = str(op.get("content") or "").strip()
+        old_fragment = str(op.get("old_text") or "").strip()
+        if op_action in {"add", "replace"} and new_content:
+            decision = check_lower_authority_write(
+                new_content,
+                operation=f"legacy_memory_{op_action}",
+                source="memory_tool",
+            )
+            if not decision.allowed:
+                return _authority_rejection_result(decision)
+        if op_action in {"remove", "replace"} and old_fragment:
+            matched = [entry for entry in existing_entries if old_fragment in entry]
+            if matched:
+                decision = check_lower_authority_removal(
+                    "\n".join(matched),
+                    operation=f"legacy_memory_{op_action}",
+                    source="memory_tool",
+                )
+                if not decision.allowed:
+                    return _authority_rejection_result(decision)
+    return None
+
+
 def memory_tool(
     action: str = None,
     target: str = "memory",
@@ -1096,6 +1165,11 @@ def memory_tool(
     if operations:
         if not isinstance(operations, list):
             return tool_error("operations must be a list of {action, content?, old_text?} objects.", success=False)
+        authority_result = _authority_gate_legacy_memory(
+            store=store, target=target, operations=operations
+        )
+        if authority_result is not None:
+            return authority_result
         gate_result = _apply_batch_write_gate(target, operations)
         if gate_result is not None:
             return gate_result
@@ -1118,6 +1192,16 @@ def memory_tool(
         return tool_error(f"{missing} is required for 'replace' action.", success=False)
     if action == "remove" and not old_text:
         return _missing_old_text_error(store, target, "remove")
+
+    authority_result = _authority_gate_legacy_memory(
+        store=store,
+        target=target,
+        action=action,
+        content=content,
+        old_text=old_text,
+    )
+    if authority_result is not None:
+        return authority_result
 
     # Approval gate: when on, stages the write (background/gateway) or prompts
     # inline (interactive CLI); when off (default) passes straight through.
@@ -1155,8 +1239,19 @@ def apply_memory_pending(payload: Dict[str, Any], store: "MemoryStore") -> Dict[
     target = payload.get("target", "memory")
     content = payload.get("content") or ""
     old_text = payload.get("old_text") or ""
+    operations = payload.get("operations") or []
+    authority_result = _authority_gate_legacy_memory(
+        store=store,
+        target=target,
+        action=action,
+        content=content,
+        old_text=old_text,
+        operations=operations if action == "batch" else None,
+    )
+    if authority_result is not None:
+        return json.loads(authority_result)
     if action == "batch":
-        return store.apply_batch(target, payload.get("operations") or [])
+        return store.apply_batch(target, operations)
     if action == "add":
         return store.add(target, content)
     if action == "replace":

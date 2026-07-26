@@ -305,6 +305,54 @@ class TestInsightsPopulated:
         assert overview["total_hours"] > 0
         assert overview["avg_session_duration"] > 0
 
+    def test_overview_normalizes_mixed_timestamp_formats(self, db):
+        engine = InsightsEngine(db)
+        sessions = [
+            {
+                "model": "test-model",
+                "started_at": 1704067200.0,
+                "ended_at": "2024-01-01T00:10:00+00:00",
+            },
+            {
+                "model": "test-model",
+                "started_at": "2024-01-02T00:00:00Z",
+                "ended_at": 1704154200.0,
+            },
+        ]
+
+        overview = engine._compute_overview(sessions, {}, [])
+
+        assert overview["total_hours"] == pytest.approx(1200 / 3600)
+        assert overview["avg_session_duration"] == pytest.approx(600)
+        assert overview["date_range_start"] == 1704067200.0
+        assert overview["date_range_end"] == 1704153600.0
+
+    def test_top_sessions_normalizes_mixed_timestamp_formats(self, db):
+        engine = InsightsEngine(db)
+        sessions = [
+            {
+                "id": "numeric-start",
+                "model": "test-model",
+                "started_at": 1704067200.0,
+                "ended_at": "2024-01-01T00:10:00+00:00",
+                "message_count": 2,
+            },
+            {
+                "id": "iso-start",
+                "model": "test-model",
+                "started_at": "2024-01-02T00:00:00Z",
+                "ended_at": 1704154800.0,
+                "tool_call_count": 1,
+            },
+        ]
+
+        top = engine._compute_top_sessions(sessions)
+
+        longest = next(item for item in top if item["label"] == "Longest session")
+        assert longest["session_id"] == "iso-start"
+        assert longest["value"] == "20m"
+        assert longest["date"] == "Jan 02"
+
     def test_model_breakdown(self, populated_db):
         engine = InsightsEngine(populated_db)
         report = engine.generate(days=30)
@@ -462,6 +510,19 @@ class TestInsightsPopulated:
         assert activity["active_days"] >= 1
         assert activity["busiest_day"] is not None
         assert activity["busiest_hour"] is not None
+
+    def test_activity_patterns_coerces_and_skips_bad_timestamps(self, db):
+        engine = InsightsEngine(db)
+        activity = engine._compute_activity_patterns([
+            {"started_at": "2024-01-02T03:04:05+00:00"},
+            {"started_at": "not-a-timestamp"},
+            {"started_at": 10**100},
+            {"started_at": float("nan")},
+        ])
+
+        assert sum(item["count"] for item in activity["by_day"]) == 1
+        assert sum(item["count"] for item in activity["by_hour"]) == 1
+        assert activity["active_days"] == 1
 
     def test_top_sessions(self, populated_db):
         engine = InsightsEngine(populated_db)
