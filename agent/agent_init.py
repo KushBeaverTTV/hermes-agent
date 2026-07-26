@@ -498,6 +498,7 @@ def init_agent(
     platform: str = None,
     user_id: str = None,
     user_id_alt: str = None,
+    explicit_owner_source: bool = False,
     user_name: str = None,
     chat_id: str = None,
     chat_name: str = None,
@@ -585,6 +586,9 @@ def init_agent(
     agent.platform = platform  # "cli", "telegram", "discord", "whatsapp", etc.
     agent._user_id = user_id  # Platform user identifier (gateway sessions)
     agent._user_id_alt = user_id_alt  # Optional stable alternate platform identifier
+    # Profile-aware owner decision made by GatewayAuthorizationMixin using the
+    # transport source's exact primary user_id. The agent must not recompute it.
+    agent._explicit_owner_source = bool(explicit_owner_source)
     agent._user_name = user_name
     agent._chat_id = chat_id
     agent._chat_name = chat_name

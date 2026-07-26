@@ -57,8 +57,7 @@ def test_runtime_argv_preserves_non_secret_runtime_contract_as_list():
         "--restart", "unless-stopped",
         "-v", "/opt/data:/opt/data:rw",
         "-p", "127.0.0.1:4860:4860/tcp",
-        "--network", "hostnet",
-        "--network-alias", "hermes-agent",
+        "--network", "name=hostnet,alias=hermes-agent",
         "--label", "traefik.enable=true",
         "--label", "traefik.http.routers.hermes.rule=Host(`hermes.example.com`)",
         "--add-host", "example:127.0.0.1",
@@ -88,10 +87,8 @@ def test_runtime_argv_preserves_each_non_default_network_and_its_aliases():
 
     assert args == [
         "--restart", "unless-stopped",
-        "--network", "primary",
-        "--network-alias", "gateway",
-        "--network", "secondary",
-        "--network-alias", "worker",
+        "--network", "name=primary,alias=gateway",
+        "--network", "name=secondary,alias=worker",
     ]
 
 

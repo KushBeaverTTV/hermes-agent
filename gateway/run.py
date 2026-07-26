@@ -21779,6 +21779,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     platform=platform_key,
                     user_id=source.user_id,
                     user_id_alt=source.user_id_alt,
+                    explicit_owner_source=self._is_explicit_owner_source(source),
                     user_name=source.user_name,
                     chat_id=source.chat_id,
                     chat_name=source.chat_name,
@@ -21801,6 +21802,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         )
                         self._enforce_agent_cache_cap()
                 logger.debug("Created new agent for session %s (sig=%s)", session_key, _sig)
+
+            # Refresh on every turn, including cached agents. This delegates the
+            # decision to the gateway's profile-aware, primary-user-id predicate.
+            agent._explicit_owner_source = self._is_explicit_owner_source(source)
 
             # Per-message state — callbacks and reasoning config change every
             # turn and must not be baked into the cached agent constructor.

@@ -12,6 +12,7 @@ RUNBOOK = ROOT / "docker/aurora-deploy-runbook.sh"
 STARTUP = ROOT / "docker/aurora-startup-check.sh"
 MANIFEST = ROOT / "vendor/AURORA-VENDOR-MANIFEST.json"
 VERIFIER = ROOT / "scripts/verify-aurora-vendor-manifest.py"
+ROLLBACK_VERIFIER = ROOT / "scripts/validate-aurora-rollback-receipt.py"
 
 
 def test_dockerfile_uses_locked_voice_extra_and_oci_provenance_labels():
@@ -67,6 +68,40 @@ def test_manual_rollback_is_sha_bound_and_health_wait_exceeds_docker_budget():
     assert '[[ "$AURORA_ROLLBACK_APPROVED" == "YES:$DEPLOYMENT_SHA" ]]' in source
     assert 'RECEIPT_DIR="$RECEIPT_ROOT/$DEPLOYMENT_SHA"' in source
     assert 'for _ in {1..48}; do' in source
+    assert 'scripts/validate-aurora-rollback-receipt.py' in source
+
+
+def test_rollback_receipt_verifier_rejects_each_identity_mismatch(tmp_path):
+    receipt = tmp_path / "receipt"
+    receipt.mkdir()
+    sha = "a" * 40
+    expected_container = f"hermes-rollback-{sha[:12]}"
+    expected_image = "sha256:" + "b" * 64
+    (receipt / "authority-sha.txt").write_text(sha + "\n")
+    (receipt / "container-name.txt").write_text(expected_container + "\n")
+    (receipt / "previous-image-id.txt").write_text(expected_image + "\n")
+
+    base = [
+        sys.executable,
+        str(ROLLBACK_VERIFIER),
+        "--receipt-dir", str(receipt),
+        "--deployment-sha", sha,
+        "--expected-container", expected_container,
+        "--preserved-image", expected_image,
+    ]
+    assert subprocess.run(base, capture_output=True, text=True).returncode == 0
+
+    cases = [
+        ("authority-sha.txt", "c" * 40),
+        ("container-name.txt", "wrong-container"),
+        ("previous-image-id.txt", "sha256:" + "d" * 64),
+    ]
+    originals = {name: (receipt / name).read_text() for name, _ in cases}
+    for name, wrong in cases:
+        (receipt / name).write_text(wrong + "\n")
+        failed = subprocess.run(base, capture_output=True, text=True)
+        assert failed.returncode != 0, name
+        (receipt / name).write_text(originals[name])
 
 
 def test_deploy_runbook_derives_host_data_mount_instead_of_assuming_host_opt_data():

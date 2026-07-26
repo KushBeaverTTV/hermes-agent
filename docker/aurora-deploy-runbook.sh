@@ -108,16 +108,16 @@ capture_runtime_argv() {
 }
 
 rollback_saved_container() {
-  local saved
-  [[ -r "$RECEIPT_DIR/container-name.txt" ]] || {
-    echo "ROLLBACK FAIL: missing container receipt" >&2
-    return 1
-  }
-  IFS= read -r saved < "$RECEIPT_DIR/container-name.txt"
-  [[ -n "$saved" ]] || { echo "ROLLBACK FAIL: empty saved container name" >&2; return 1; }
-  docker inspect "$saved" >/dev/null
+  local preserved_image
+  docker inspect "$ROLLBACK_CONTAINER" >/dev/null
+  preserved_image="$(docker inspect --format='{{.Image}}' "$ROLLBACK_CONTAINER")"
+  python3 scripts/validate-aurora-rollback-receipt.py \
+    --receipt-dir "$RECEIPT_DIR" \
+    --deployment-sha "$DEPLOYMENT_SHA" \
+    --expected-container "$ROLLBACK_CONTAINER" \
+    --preserved-image "$preserved_image"
   docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
-  docker rename "$saved" "$CONTAINER"
+  docker rename "$ROLLBACK_CONTAINER" "$CONTAINER"
   docker start "$CONTAINER"
   echo "ROLLBACK PASS: restored exact preserved container $CONTAINER"
 }

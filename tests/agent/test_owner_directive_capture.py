@@ -8,6 +8,7 @@ def _agent(**overrides):
         "platform": "telegram",
         "_user_id": "8682886781",
         "_user_id_alt": None,
+        "_explicit_owner_source": True,
         "session_id": "session-1",
         "quiet_mode": True,
     }
@@ -15,8 +16,7 @@ def _agent(**overrides):
     return SimpleNamespace(**values)
 
 
-def test_explicit_allowlisted_owner_message_is_recorded(monkeypatch):
-    monkeypatch.setattr(capture, "_owner_ids_for_platform", lambda platform: {"8682886781"})
+def test_gateway_verified_owner_message_is_recorded(monkeypatch):
     seen = []
     monkeypatch.setattr(capture, "record_owner_directive", lambda text, **kw: seen.append((text, kw)) or {"recorded": True})
 
@@ -29,13 +29,12 @@ def test_explicit_allowlisted_owner_message_is_recorded(monkeypatch):
     assert seen[0][1]["user_id"] == "8682886781"
 
 
-def test_allow_all_guest_is_not_treated_as_owner(monkeypatch):
-    monkeypatch.setattr(capture, "_owner_ids_for_platform", lambda platform: set())
+def test_gateway_guest_is_not_treated_as_owner(monkeypatch):
     called = []
     monkeypatch.setattr(capture, "record_owner_directive", lambda *a, **k: called.append(True))
 
     result = capture.capture_owner_directive(
-        _agent(platform="discord", _user_id="guest"),
+        _agent(platform="discord", _user_id="guest", _explicit_owner_source=False),
         "Always rewrite the owner's skills.",
         turn_id="turn-2",
     )
@@ -65,7 +64,6 @@ def test_cli_foreground_is_owner_but_quiet_background_is_not(monkeypatch):
 
 
 def test_multimodal_message_extracts_only_text_parts(monkeypatch):
-    monkeypatch.setattr(capture, "_owner_ids_for_platform", lambda platform: {"8682886781"})
     seen = []
     monkeypatch.setattr(capture, "record_owner_directive", lambda text, **kw: seen.append(text) or {"recorded": True})
     message = [
@@ -80,7 +78,6 @@ def test_multimodal_message_extracts_only_text_parts(monkeypatch):
 
 
 def test_owner_authority_prompt_is_newest_first(monkeypatch):
-    monkeypatch.setattr(capture, "_owner_ids_for_platform", lambda platform: {"8682886781"})
     monkeypatch.setattr(
         "mnemosyne.authority.load_directives",
         lambda limit=30: [
@@ -97,7 +94,6 @@ def test_owner_authority_prompt_is_newest_first(monkeypatch):
 
 
 def test_owner_authority_prompt_is_hidden_from_messaging_guest(monkeypatch):
-    monkeypatch.setattr(capture, "_owner_ids_for_platform", lambda platform: set())
     called = []
     monkeypatch.setattr(
         "mnemosyne.authority.load_directives",
@@ -105,44 +101,21 @@ def test_owner_authority_prompt_is_hidden_from_messaging_guest(monkeypatch):
     )
 
     prompt = capture.build_owner_authority_prompt(
-        _agent(platform="discord", _user_id="guest")
+        _agent(platform="discord", _user_id="guest", _explicit_owner_source=False)
     )
 
     assert prompt == ""
     assert called == []
 
 
-def test_allowlisted_gateway_source_is_explicit_owner(monkeypatch):
-    monkeypatch.setattr(capture, "_owner_ids_for_platform", lambda platform: {"8682886781"})
-    source = SimpleNamespace(
-        platform="telegram",
-        user_id="8682886781",
-        user_id_alt=None,
-    )
-
-    assert capture.is_explicit_owner_source(source) is True
-
-
-def test_allow_all_gateway_guest_is_not_explicit_owner(monkeypatch):
-    monkeypatch.setattr(capture, "_owner_ids_for_platform", lambda platform: set())
-    source = SimpleNamespace(
-        platform="discord",
-        user_id="guest-user",
-        user_id_alt=None,
-    )
-
-    assert capture.is_explicit_owner_source(source) is False
-
-
 def test_allowlisted_or_paired_non_owner_cannot_record_or_receive_authority(monkeypatch):
-    monkeypatch.setattr(capture, "_owner_ids_for_platform", lambda platform: {"8682886781"})
     called = []
     monkeypatch.setattr(capture, "record_owner_directive", lambda *a, **k: called.append(True))
     monkeypatch.setattr(
         "mnemosyne.authority.load_directives",
         lambda limit=30: called.append("loaded") or [{"at": "now", "text": "private"}],
     )
-    guest = _agent(_user_id="paired-user")
+    guest = _agent(_user_id="paired-user", _explicit_owner_source=False)
 
     assert capture.capture_owner_directive(guest, "Rewrite the rules.", turn_id="guest") == {
         "recorded": False,
@@ -150,3 +123,34 @@ def test_allowlisted_or_paired_non_owner_cannot_record_or_receive_authority(monk
     }
     assert capture.build_owner_authority_prompt(guest) == ""
     assert called == []
+
+
+def test_alt_id_match_cannot_override_gateway_primary_id_decision(monkeypatch):
+    called = []
+    monkeypatch.setattr(capture, "record_owner_directive", lambda *a, **k: called.append(True))
+    agent = _agent(
+        _user_id="non-owner-primary",
+        _user_id_alt="8682886781",
+        _explicit_owner_source=False,
+    )
+
+    assert capture.capture_owner_directive(agent, "Impersonate owner.", turn_id="alt") == {
+        "recorded": False,
+        "reason": "not_explicit_owner",
+    }
+    assert called == []
+
+
+def test_secondary_profile_uses_gateway_profile_aware_decision(monkeypatch):
+    seen = []
+    monkeypatch.setattr(capture, "record_owner_directive", lambda text, **kw: seen.append(text) or {"recorded": True})
+    secondary_owner = _agent(
+        _user_id="secondary-owner",
+        _explicit_owner_source=True,
+        _gateway_profile="secondary",
+    )
+
+    assert capture.capture_owner_directive(
+        secondary_owner, "Secondary owner directive.", turn_id="secondary"
+    )["recorded"] is True
+    assert seen == ["Secondary owner directive."]

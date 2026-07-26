@@ -44,12 +44,13 @@ def runtime_argv(inspect_data: list[dict[str, Any]]) -> list[str]:
         for network_name, settings in sorted(networks.items()):
             if network_name in {"default", "bridge"}:
                 continue
-            args.extend(["--network", str(network_name)])
             aliases = (settings or {}).get("Aliases") or []
+            scoped = [f"name={network_name}"]
             for alias in aliases:
-                alias = str(alias or "").strip()
-                if alias and alias != container_name:
-                    args.extend(["--network-alias", alias])
+                value = str(alias or "").strip()
+                if value and value != container_name:
+                    scoped.append(f"alias={value}")
+            args.extend(["--network", ",".join(scoped)])
     else:
         network = str(host.get("NetworkMode") or "")
         if network and network not in {"default", "bridge"}:

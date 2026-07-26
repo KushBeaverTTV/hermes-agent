@@ -411,6 +411,7 @@ class AIAgent:
     for AI models that support function calling.
     """
 
+    _explicit_owner_source: bool
     _TOOL_CALL_ARGUMENTS_CORRUPTION_MARKER = (
         "[hermes-agent: tool call arguments were corrupted in this session and "
         "have been dropped to keep the conversation alive. See issue #15236.]"
@@ -480,6 +481,7 @@ class AIAgent:
         platform: str = None,
         user_id: str = None,
         user_id_alt: str = None,
+        explicit_owner_source: bool = False,
         user_name: str = None,
         chat_id: str = None,
         chat_name: str = None,
@@ -558,6 +560,7 @@ class AIAgent:
             platform=platform,
             user_id=user_id,
             user_id_alt=user_id_alt,
+            explicit_owner_source=explicit_owner_source,
             user_name=user_name,
             chat_id=chat_id,
             chat_name=chat_name,

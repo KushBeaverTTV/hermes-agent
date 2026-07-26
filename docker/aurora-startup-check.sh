@@ -48,7 +48,7 @@ PY
 [ -s /opt/aurora-authority-sha ] || fail "authority build SHA missing"
 cmp -s /opt/hermes/.hermes_build_sha /opt/aurora-authority-sha \
   || fail "base/authority SHA mismatch"
-"$PY" -c "from agent.owner_directive_capture import is_explicit_owner_source" 2>/dev/null \
+"$PY" -c "from agent.owner_directive_capture import _is_explicit_owner" 2>/dev/null \
   || fail "owner authority capture missing"
 ACTUAL_GATEWAY_SOURCE="$($PY -c 'import pathlib, gateway.run; print(pathlib.Path(gateway.run.__file__).resolve())')" \
   || fail "gateway source import failed"
@@ -56,16 +56,24 @@ ACTUAL_GATEWAY_SOURCE="$($PY -c 'import pathlib, gateway.run; print(pathlib.Path
   || fail "gateway source mismatch: $ACTUAL_GATEWAY_SOURCE"
 "$PY" - <<'PY' || fail "owner gateway control-plane wiring missing"
 import inspect
+import pathlib
+import gateway.run
 
 from gateway.authz_mixin import GatewayAuthorizationMixin
 from gateway.run import GatewayRunner
+from agent.owner_directive_capture import _is_explicit_owner
 
 assert issubclass(GatewayRunner, GatewayAuthorizationMixin)
 owner_source = inspect.getsource(GatewayAuthorizationMixin._is_explicit_owner_source)
 owner_event = inspect.getsource(GatewayRunner._is_explicit_owner_event)
+capture_source = inspect.getsource(_is_explicit_owner)
+gateway_source = pathlib.Path(gateway.run.__file__).read_text(encoding="utf-8")
 assert "owner_user_ids" in owner_source
 assert 'allowed = _coerce_allow_set(raw_owner_ids) - {"*"}' in owner_source
 assert "self._is_explicit_owner_source" in owner_event
+assert '_explicit_owner_source' in capture_source
+assert 'explicit_owner_source=self._is_explicit_owner_source(source)' in gateway_source
+assert 'agent._explicit_owner_source = self._is_explicit_owner_source(source)' in gateway_source
 print("AURORA-STARTUP: owner gateway control-plane wiring OK")
 PY
 echo "AURORA-STARTUP: owner authority SHA $(cat /opt/aurora-authority-sha) OK"

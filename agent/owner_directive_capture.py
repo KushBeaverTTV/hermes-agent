@@ -14,61 +14,18 @@ def _platform_name(value: Any) -> str:
     return str(raw or "").strip().lower()
 
 
-def _owner_ids_for_platform(platform: str) -> set[str]:
-    """Load the same resolved config-backed owner set used by the gateway."""
-    try:
-        from gateway.config import load_gateway_config
-        from gateway.platforms.base import Platform
-
-        resolved = load_gateway_config()
-        platform_config = resolved.platforms.get(Platform(platform))
-    except (ImportError, KeyError, TypeError, ValueError):
-        return set()
-    if platform_config is None:
-        return set()
-    extra = getattr(platform_config, "extra", None)
-    raw_owner_ids = extra.get("owner_user_ids") if isinstance(extra, dict) else None
-    return _allowset(raw_owner_ids) - {"*"}
-
-
-def _allowset(raw: Any) -> set[str]:
-    if isinstance(raw, (list, tuple, set)):
-        return {str(item).strip() for item in raw if str(item).strip()}
-    return {item.strip() for item in str(raw or "").split(",") if item.strip()}
-
-
-def is_explicit_owner_source(source: Any) -> bool:
-    """Return whether a gateway source is an exact config-declared owner.
-
-    Authorization and ownership are deliberately different: allowlists,
-    allow-all guests, and paired users may chat, but only identities in
-    ``gateway.platforms.<platform>.extra.owner_user_ids`` are owners.
-    """
-    platform = _platform_name(getattr(source, "platform", ""))
-    if platform not in _OWNER_PLATFORMS:
-        return False
-    allowed = _owner_ids_for_platform(platform)
-    identities = {
-        str(getattr(source, "user_id", "") or "").strip(),
-        str(getattr(source, "user_id_alt", "") or "").strip(),
-    }
-    identities.discard("")
-    return bool(allowed & identities)
-
-
 def _is_explicit_owner(agent: Any) -> bool:
     platform = _platform_name(getattr(agent, "platform", ""))
     if platform == "cli":
         # Interactive CLI is a direct owner surface. Quiet CLI instances are
         # cron/background/subagent jobs and must never author owner directives.
         return not bool(getattr(agent, "quiet_mode", False))
-    source = type("OwnerSource", (), {
-        "platform": platform,
-        "user_id": getattr(agent, "_user_id", None),
-        "user_id_alt": getattr(agent, "_user_id_alt", None),
-    })()
-    # Deliberately ignore *_ALLOW_ALL_USERS: authorized guests are not owners.
-    return is_explicit_owner_source(source)
+    if platform not in _OWNER_PLATFORMS:
+        return False
+    # The gateway owns the profile-aware authorization decision. Do not
+    # recompute it from mutable allowlists, alternate IDs, or default-profile
+    # config inside the agent layer.
+    return bool(getattr(agent, "_explicit_owner_source", False))
 
 
 def _text_content(message: Any) -> str:
