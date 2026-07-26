@@ -6173,11 +6173,13 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             thread_meta = self._thread_metadata_for_source(event.source, reply_anchor)
             if self._queue_during_drain_enabled():
                 if explicit_owner:
-                    self._preempt_busy_queue_with_owner_event(
+                    installed = self._preempt_busy_queue_with_owner_event(
                         session_key,
                         event,
                         adapter=adapter,
                     )
+                    if not installed:
+                        self._queue_or_replace_pending_event(session_key, event)
                 else:
                     self._queue_or_replace_pending_event(session_key, event)
                 message = f"⏳ Gateway {self._status_action_gerund()} — queued for the next turn after it comes back."
@@ -6401,6 +6403,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 event,
                 adapter=adapter,
             )
+            if not owner_turn_installed:
+                self._queue_or_replace_pending_event(session_key, event)
         elif not steered and not redirected:
             self._queue_or_replace_pending_event(session_key, event)
 
@@ -11547,7 +11551,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             if self._draining:
                 if self._queue_during_drain_enabled():
                     if _explicit_owner:
-                        self._preempt_busy_queue_with_owner_event(_quick_key, event)
+                        installed = self._preempt_busy_queue_with_owner_event(
+                            _quick_key, event
+                        )
+                        if not installed:
+                            self._queue_or_replace_pending_event(_quick_key, event)
                     else:
                         self._queue_or_replace_pending_event(_quick_key, event)
                 return (
@@ -11560,7 +11568,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 if _explicit_owner:
                     # The startup sentinel cannot be interrupted, but an exact
                     # owner turn must still become the next standalone event.
-                    self._preempt_busy_queue_with_owner_event(_quick_key, event)
+                    installed = self._preempt_busy_queue_with_owner_event(
+                        _quick_key, event
+                    )
+                    if not installed:
+                        self._queue_or_replace_pending_event(_quick_key, event)
                     return None
                 # Queue the message so it will be picked up after the
                 # agent starts.
@@ -11582,6 +11594,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     _quick_key,
                     event,
                 )
+                if not owner_turn_installed:
+                    self._queue_or_replace_pending_event(_quick_key, event)
                 if (
                     owner_turn_installed
                     and running_agent

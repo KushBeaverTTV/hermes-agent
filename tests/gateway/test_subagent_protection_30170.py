@@ -96,8 +96,10 @@ def _make_runner() -> GatewayRunner:
     runner.hooks = MagicMock()
     runner.hooks.emit = AsyncMock()
     runner.pairing_store = MagicMock()
-    runner.pairing_store.is_approved.return_value = False
-    runner._is_user_authorized = lambda _source: True
+    # Exercise the production authorization path by default: ordinary test
+    # users are paired/authorized, but pairing alone never grants exact-owner
+    # control-plane authority.
+    runner.pairing_store.is_approved.return_value = True
     return runner
 
 
@@ -389,6 +391,52 @@ class TestBusyHandlerDemotesInterruptForSubagents:
         parent.interrupt.assert_called_once_with(owner_event.text)
 
     @pytest.mark.asyncio
+    async def test_adapter_owner_falls_back_to_queue_when_preemption_rejects(
+        self,
+    ) -> None:
+        runner = _make_runner()
+        _set_owner_ids(runner, "user1")
+        runner._busy_input_mode = "interrupt"
+        adapter = _make_adapter()
+        event = _make_event(text="owner survives adapter rejection")
+        sk = build_session_key(event.source)
+        parent = _make_parent_no_subagents()
+        runner._running_agents[sk] = parent
+        runner.adapters[event.source.platform] = adapter
+        runner._preempt_busy_queue_with_owner_event = MagicMock(return_value=False)
+
+        handled = await runner._handle_active_session_busy_message(event, sk)
+
+        assert handled is True
+        assert adapter._pending_messages[sk] is event
+        parent.interrupt.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_adapter_drain_owner_falls_back_when_preemption_rejects(
+        self,
+    ) -> None:
+        runner = _make_runner()
+        _set_owner_ids(runner, "user1")
+        runner._draining = True
+        runner._busy_input_mode = "queue"
+        runner._restart_requested = True
+        runner._status_action_gerund = lambda: "restarting"
+        runner._reply_anchor_for_event = lambda event: None
+        runner._thread_metadata_for_source = lambda *_args, **_kwargs: None
+        adapter = _make_adapter()
+        event = _make_event(text="owner survives adapter drain")
+        sk = build_session_key(event.source)
+        runner._running_agents[sk] = _AGENT_PENDING_SENTINEL
+        runner.adapters[event.source.platform] = adapter
+        runner._preempt_busy_queue_with_owner_event = MagicMock(return_value=False)
+
+        handled = await runner._handle_active_session_busy_message(event, sk)
+
+        assert handled is True
+        assert adapter._pending_messages[sk] is event
+        adapter._send_with_retry.assert_awaited_once()
+
+    @pytest.mark.asyncio
     async def test_allow_all_guest_remains_queued_behind_active_subagent(
         self, monkeypatch
     ) -> None:
@@ -400,7 +448,9 @@ class TestBusyHandlerDemotesInterruptForSubagents:
             else default,
         )
         runner = _make_runner()
-        del runner.__dict__["_is_user_authorized"]
+        # Force this assertion through DISCORD_ALLOW_ALL_USERS rather than the
+        # pairing fallback.
+        runner.pairing_store.is_approved = MagicMock(return_value=False)
         runner._busy_input_mode = "interrupt"
         adapter = _make_adapter()
         adapter.config = PlatformConfig(enabled=True, extra={})
@@ -413,6 +463,30 @@ class TestBusyHandlerDemotesInterruptForSubagents:
         runner._running_agents[sk] = parent
         runner.config.platforms[Platform.DISCORD] = adapter.config
         runner.adapters[Platform.DISCORD] = adapter
+
+        assert runner._is_user_authorized(event.source) is True
+        assert runner._is_explicit_owner_source(event.source) is False
+
+        handled = await runner._handle_active_session_busy_message(event, sk)
+
+        assert handled is True
+        parent.interrupt.assert_not_called()
+        assert adapter._pending_messages.get(sk) is event
+
+    @pytest.mark.asyncio
+    async def test_approved_paired_guest_is_authorized_but_cannot_preempt_owner_turn(
+        self,
+    ) -> None:
+        runner = _make_runner()
+        _set_owner_ids(runner, "actual-owner")
+        runner._busy_input_mode = "interrupt"
+        adapter = _make_adapter()
+        event = _make_event(text="paired guest follow-up")
+        event.source.user_id = "paired-guest"
+        sk = build_session_key(event.source)
+        parent = _make_parent_with_subagents()
+        runner._running_agents[sk] = parent
+        runner.adapters[event.source.platform] = adapter
 
         assert runner._is_user_authorized(event.source) is True
         assert runner._is_explicit_owner_source(event.source) is False
