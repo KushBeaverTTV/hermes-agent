@@ -350,22 +350,43 @@ class GatewayAuthorizationMixin:
         This is deliberately narrower than ``_is_user_authorized``. Pairing,
         roles, chat allowlists, and allow-all flags grant conversation access;
         they do not grant control-plane authority over an active agent turn.
-        User-controlled display labels are never considered.
+        User-controlled display labels are never considered. A dedicated
+        ``{PLATFORM}_OWNER_USER_IDS`` list is the only source of owner
+        authority — never the pairing-mirrored conversation allowlist.
         """
         if source is None or getattr(source, "is_bot", False) is True:
             return False
         platform = getattr(getattr(source, "platform", None), "value", None)
         if not platform:
             return False
-        try:
-            from gateway.pairing import _allowlist_env_for_platform
-
-            env_name = _allowlist_env_for_platform(str(platform))
-        except Exception:
-            return False
-        allowed = _coerce_allow_set(_auth_env(env_name or "")) - {"*"}
         user_id = str(getattr(source, "user_id", None) or "").strip()
-        return bool(user_id and user_id in allowed)
+        if not user_id:
+            return False
+        env_map = {
+            "telegram": "TELEGRAM_OWNER_USER_IDS",
+            "discord": "DISCORD_OWNER_USER_IDS",
+            "whatsapp": "WHATSAPP_OWNER_USER_IDS",
+            "whatsapp_cloud": "WHATSAPP_CLOUD_OWNER_USER_IDS",
+            "slack": "SLACK_OWNER_USER_IDS",
+            "signal": "SIGNAL_OWNER_USER_IDS",
+            "email": "EMAIL_OWNER_USER_IDS",
+            "sms": "SMS_OWNER_USER_IDS",
+            "mattermost": "MATTERMOST_OWNER_USER_IDS",
+            "matrix": "MATRIX_OWNER_USER_IDS",
+            "dingtalk": "DINGTALK_OWNER_USER_IDS",
+            "feishu": "FEISHU_OWNER_USER_IDS",
+            "wecom": "WECOM_OWNER_USER_IDS",
+            "wecom_callback": "WECOM_CALLBACK_OWNER_USER_IDS",
+            "weixin": "WEIXIN_OWNER_USER_IDS",
+            "bluebubbles": "BLUEBUBBLES_OWNER_USER_IDS",
+            "qqbot": "QQ_OWNER_USER_IDS",
+            "yuanbao": "YUANBAO_OWNER_USER_IDS",
+        }
+        env_name = env_map.get(str(platform))
+        if not env_name:
+            return False
+        allowed = _coerce_allow_set(_auth_env(env_name)) - {"*"}
+        return user_id in allowed
 
     def _is_user_authorized(self, source: SessionSource) -> bool:
         """

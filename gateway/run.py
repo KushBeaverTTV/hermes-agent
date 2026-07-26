@@ -6150,6 +6150,15 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             )
             return True  # handled (silently dropped); do not fall through
 
+        explicit_owner = (
+            not bool(getattr(event, "internal", False))
+            and event.message_type == MessageType.TEXT
+            and bool((event.text or "").strip())
+            and not event.media_urls
+            and not event.media_types
+            and self._is_explicit_owner_source(event.source)
+        )
+
         # --- Draining case (gateway restarting/stopping) ---
         if self._draining:
             adapter = self._adapter_for_source(event.source)
@@ -6159,7 +6168,14 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             reply_anchor = self._reply_anchor_for_event(event)
             thread_meta = self._thread_metadata_for_source(event.source, reply_anchor)
             if self._queue_during_drain_enabled():
-                self._queue_or_replace_pending_event(session_key, event)
+                if explicit_owner:
+                    self._preempt_busy_queue_with_owner_event(
+                        session_key,
+                        event,
+                        adapter=adapter,
+                    )
+                else:
+                    self._queue_or_replace_pending_event(session_key, event)
                 message = f"⏳ Gateway {self._status_action_gerund()} — queued for the next turn after it comes back."
             else:
                 message = f"⏳ Gateway is {self._status_action_gerund()} and is not accepting another turn right now."
@@ -6274,18 +6290,6 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
         running_agent = self._running_agents.get(session_key)
 
-        # Authenticated owner text is a control-plane supersession, not a
-        # conversational steer. It must become the next real user turn and
-        # terminate stale parent/tool/child work. Never let configured steer,
-        # queue mode, subagent protection, compression protection, or broad
-        # chat authorization outrank the exact platform owner.
-        explicit_owner = (
-            event.message_type == MessageType.TEXT
-            and bool((event.text or "").strip())
-            and not event.media_urls
-            and not event.media_types
-            and self._is_explicit_owner_source(event.source)
-        )
         effective_mode = "interrupt" if explicit_owner else self._busy_input_mode
         busy_text_mode = getattr(self, "_busy_text_mode", "interrupt")
         if (
@@ -11535,13 +11539,27 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 return None
 
             running_agent = self._running_agents.get(_quick_key)
+            if (
+                running_agent is _AGENT_PENDING_SENTINEL
+                and event.get_command() == "stop"
+            ):
+                # Force-clean the sentinel so the session is unlocked.
+                self._release_running_agent_state(_quick_key)
+                logger.info("HARD STOP (pending) for session %s — sentinel cleared", _quick_key)
+                return EphemeralReply("⚡ Force-stopped. The agent was still starting — session unlocked.")
+            if self._draining:
+                if self._queue_during_drain_enabled():
+                    if _explicit_owner:
+                        self._preempt_busy_queue_with_owner_event(_quick_key, event)
+                    else:
+                        self._queue_or_replace_pending_event(_quick_key, event)
+                return (
+                    f"⏳ Gateway {self._status_action_gerund()} — queued for the next turn after it comes back."
+                    if self._queue_during_drain_enabled()
+                    else f"⏳ Gateway is {self._status_action_gerund()} and is not accepting another turn right now."
+                )
             if running_agent is _AGENT_PENDING_SENTINEL:
                 # Agent is being set up but not ready yet.
-                if event.get_command() == "stop":
-                    # Force-clean the sentinel so the session is unlocked.
-                    self._release_running_agent_state(_quick_key)
-                    logger.info("HARD STOP (pending) for session %s — sentinel cleared", _quick_key)
-                    return EphemeralReply("⚡ Force-stopped. The agent was still starting — session unlocked.")
                 if _explicit_owner:
                     # The startup sentinel cannot be interrupted, but an exact
                     # owner turn must still become the next standalone event.
@@ -11558,14 +11576,6 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         merge_text=True,
                     )
                 return None
-            if self._draining:
-                if self._queue_during_drain_enabled():
-                    self._queue_or_replace_pending_event(_quick_key, event)
-                return (
-                    f"⏳ Gateway {self._status_action_gerund()} — queued for the next turn after it comes back."
-                    if self._queue_during_drain_enabled()
-                    else f"⏳ Gateway is {self._status_action_gerund()} and is not accepting another turn right now."
-                )
             if _explicit_owner:
                 # Owner directions are next-turn control, never stale-turn
                 # steering. Preserve a real user-message boundary before
