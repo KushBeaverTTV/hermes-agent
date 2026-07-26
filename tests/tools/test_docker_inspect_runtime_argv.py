@@ -34,6 +34,21 @@ def test_runtime_argv_preserves_non_secret_runtime_contract_as_list():
         },
         "Config": {
             "Env": ["SECRET_TOKEN=must-not-leak"],
+            "Name": "/hermes-agent-ciiw-hermes-agent-1",
+            "Labels": {
+                "traefik.enable": "true",
+                "traefik.http.routers.hermes.rule": "Host(`hermes.example.com`)",
+                "com.docker.compose.project": "hermes-agent-ciiw",
+                "private.secret": "must-not-leak",
+            },
+        },
+        "Name": "/hermes-agent-ciiw-hermes-agent-1",
+        "NetworkSettings": {
+            "Networks": {
+                "hostnet": {
+                    "Aliases": ["hermes-agent-ciiw-hermes-agent-1", "hermes-agent"],
+                },
+            },
         },
     }]
     args = mod.runtime_argv(inspected)
@@ -43,6 +58,9 @@ def test_runtime_argv_preserves_non_secret_runtime_contract_as_list():
         "-v", "/opt/data:/opt/data:rw",
         "-p", "127.0.0.1:4860:4860/tcp",
         "--network", "hostnet",
+        "--network-alias", "hermes-agent",
+        "--label", "traefik.enable=true",
+        "--label", "traefik.http.routers.hermes.rule=Host(`hermes.example.com`)",
         "--add-host", "example:127.0.0.1",
         "--dns", "1.1.1.1",
         "--cap-add", "NET_ADMIN",
@@ -51,7 +69,30 @@ def test_runtime_argv_preserves_non_secret_runtime_contract_as_list():
         "--read-only",
         "--device", "/dev/net/tun:/dev/net/tun:rwm",
     ]
-    assert not any("SECRET" in value or "must-not-leak" in value for value in args)
+    assert not any("SECRET" in value or "secret" in value or "must-not-leak" in value for value in args)
+
+
+def test_runtime_argv_preserves_each_non_default_network_and_its_aliases():
+    inspected = [{
+        "Name": "/hermes",
+        "HostConfig": {"NetworkMode": "primary"},
+        "NetworkSettings": {
+            "Networks": {
+                "primary": {"Aliases": ["hermes", "gateway"]},
+                "secondary": {"Aliases": ["hermes", "worker"]},
+            },
+        },
+    }]
+
+    args = mod.runtime_argv(inspected)
+
+    assert args == [
+        "--restart", "unless-stopped",
+        "--network", "primary",
+        "--network-alias", "gateway",
+        "--network", "secondary",
+        "--network-alias", "worker",
+    ]
 
 
 def test_runtime_argv_rejects_missing_or_multiple_inspections():

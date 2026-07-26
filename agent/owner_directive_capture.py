@@ -1,18 +1,12 @@
 """Capture explicit owner directives at the clean inbound turn boundary."""
 from __future__ import annotations
 
-import os
 from typing import Any
 
 
-_ALLOWED_ENV = {
-    "telegram": "TELEGRAM_ALLOWED_USERS",
-    "discord": "DISCORD_ALLOWED_USERS",
-    "whatsapp": "WHATSAPP_ALLOWED_USERS",
-    "slack": "SLACK_ALLOWED_USERS",
-    "signal": "SIGNAL_ALLOWED_USERS",
-    "matrix": "MATRIX_ALLOWED_USERS",
-}
+_OWNER_PLATFORMS = frozenset({
+    "telegram", "discord", "whatsapp", "slack", "signal", "matrix",
+})
 
 
 def _platform_name(value: Any) -> str:
@@ -20,16 +14,21 @@ def _platform_name(value: Any) -> str:
     return str(raw or "").strip().lower()
 
 
-def _get_secret(name: str) -> str:
+def _owner_ids_for_platform(platform: str) -> set[str]:
+    """Load the same resolved config-backed owner set used by the gateway."""
     try:
-        from agent.secret_scope import get_secret
+        from gateway.config import load_gateway_config
+        from gateway.platforms.base import Platform
 
-        value = get_secret(name)
-        if value is not None and str(value).strip():
-            return str(value).strip()
-    except Exception:
-        pass
-    return (os.getenv(name) or "").strip()
+        resolved = load_gateway_config()
+        platform_config = resolved.platforms.get(Platform(platform))
+    except (ImportError, KeyError, TypeError, ValueError):
+        return set()
+    if platform_config is None:
+        return set()
+    extra = getattr(platform_config, "extra", None)
+    raw_owner_ids = extra.get("owner_user_ids") if isinstance(extra, dict) else None
+    return _allowset(raw_owner_ids) - {"*"}
 
 
 def _allowset(raw: Any) -> set[str]:
@@ -39,17 +38,16 @@ def _allowset(raw: Any) -> set[str]:
 
 
 def is_explicit_owner_source(source: Any) -> bool:
-    """Return whether a gateway source is the allowlisted platform owner.
+    """Return whether a gateway source is an exact config-declared owner.
 
-    Authorization and ownership are deliberately different: allow-all guests
-    and paired users may chat, but only an identity present in the platform's
-    explicit allowlist may supersede active owner work.
+    Authorization and ownership are deliberately different: allowlists,
+    allow-all guests, and paired users may chat, but only identities in
+    ``gateway.platforms.<platform>.extra.owner_user_ids`` are owners.
     """
     platform = _platform_name(getattr(source, "platform", ""))
-    env_name = _ALLOWED_ENV.get(platform)
-    if not env_name:
+    if platform not in _OWNER_PLATFORMS:
         return False
-    allowed = _allowset(_get_secret(env_name))
+    allowed = _owner_ids_for_platform(platform)
     identities = {
         str(getattr(source, "user_id", "") or "").strip(),
         str(getattr(source, "user_id_alt", "") or "").strip(),
@@ -103,9 +101,9 @@ def build_owner_authority_prompt(agent: Any, *, limit: int = 30) -> str:
     work must still obey the owner's durable rules.
     """
     platform = _platform_name(getattr(agent, "platform", ""))
-    if platform in _ALLOWED_ENV and not _is_explicit_owner(agent):
+    if platform in _OWNER_PLATFORMS and not _is_explicit_owner(agent):
         return ""
-    if platform not in ("cli", *tuple(_ALLOWED_ENV)):
+    if platform not in ("cli", *tuple(_OWNER_PLATFORMS)):
         return ""
 
     from mnemosyne.authority import load_directives

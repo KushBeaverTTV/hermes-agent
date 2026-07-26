@@ -16,7 +16,7 @@ def _agent(**overrides):
 
 
 def test_explicit_allowlisted_owner_message_is_recorded(monkeypatch):
-    monkeypatch.setattr(capture, "_get_secret", lambda name: "8682886781" if name == "TELEGRAM_ALLOWED_USERS" else "")
+    monkeypatch.setattr(capture, "_owner_ids_for_platform", lambda platform: {"8682886781"})
     seen = []
     monkeypatch.setattr(capture, "record_owner_directive", lambda text, **kw: seen.append((text, kw)) or {"recorded": True})
 
@@ -30,7 +30,7 @@ def test_explicit_allowlisted_owner_message_is_recorded(monkeypatch):
 
 
 def test_allow_all_guest_is_not_treated_as_owner(monkeypatch):
-    monkeypatch.setattr(capture, "_get_secret", lambda name: "")
+    monkeypatch.setattr(capture, "_owner_ids_for_platform", lambda platform: set())
     called = []
     monkeypatch.setattr(capture, "record_owner_directive", lambda *a, **k: called.append(True))
 
@@ -65,7 +65,7 @@ def test_cli_foreground_is_owner_but_quiet_background_is_not(monkeypatch):
 
 
 def test_multimodal_message_extracts_only_text_parts(monkeypatch):
-    monkeypatch.setattr(capture, "_get_secret", lambda name: "8682886781" if name == "TELEGRAM_ALLOWED_USERS" else "")
+    monkeypatch.setattr(capture, "_owner_ids_for_platform", lambda platform: {"8682886781"})
     seen = []
     monkeypatch.setattr(capture, "record_owner_directive", lambda text, **kw: seen.append(text) or {"recorded": True})
     message = [
@@ -80,7 +80,7 @@ def test_multimodal_message_extracts_only_text_parts(monkeypatch):
 
 
 def test_owner_authority_prompt_is_newest_first(monkeypatch):
-    monkeypatch.setattr(capture, "_get_secret", lambda name: "8682886781")
+    monkeypatch.setattr(capture, "_owner_ids_for_platform", lambda platform: {"8682886781"})
     monkeypatch.setattr(
         "mnemosyne.authority.load_directives",
         lambda limit=30: [
@@ -97,7 +97,7 @@ def test_owner_authority_prompt_is_newest_first(monkeypatch):
 
 
 def test_owner_authority_prompt_is_hidden_from_messaging_guest(monkeypatch):
-    monkeypatch.setattr(capture, "_get_secret", lambda name: "")
+    monkeypatch.setattr(capture, "_owner_ids_for_platform", lambda platform: set())
     called = []
     monkeypatch.setattr(
         "mnemosyne.authority.load_directives",
@@ -113,11 +113,7 @@ def test_owner_authority_prompt_is_hidden_from_messaging_guest(monkeypatch):
 
 
 def test_allowlisted_gateway_source_is_explicit_owner(monkeypatch):
-    monkeypatch.setattr(
-        capture,
-        "_get_secret",
-        lambda name: "8682886781" if name == "TELEGRAM_ALLOWED_USERS" else "",
-    )
+    monkeypatch.setattr(capture, "_owner_ids_for_platform", lambda platform: {"8682886781"})
     source = SimpleNamespace(
         platform="telegram",
         user_id="8682886781",
@@ -128,7 +124,7 @@ def test_allowlisted_gateway_source_is_explicit_owner(monkeypatch):
 
 
 def test_allow_all_gateway_guest_is_not_explicit_owner(monkeypatch):
-    monkeypatch.setattr(capture, "_get_secret", lambda _name: "")
+    monkeypatch.setattr(capture, "_owner_ids_for_platform", lambda platform: set())
     source = SimpleNamespace(
         platform="discord",
         user_id="guest-user",
@@ -136,3 +132,21 @@ def test_allow_all_gateway_guest_is_not_explicit_owner(monkeypatch):
     )
 
     assert capture.is_explicit_owner_source(source) is False
+
+
+def test_allowlisted_or_paired_non_owner_cannot_record_or_receive_authority(monkeypatch):
+    monkeypatch.setattr(capture, "_owner_ids_for_platform", lambda platform: {"8682886781"})
+    called = []
+    monkeypatch.setattr(capture, "record_owner_directive", lambda *a, **k: called.append(True))
+    monkeypatch.setattr(
+        "mnemosyne.authority.load_directives",
+        lambda limit=30: called.append("loaded") or [{"at": "now", "text": "private"}],
+    )
+    guest = _agent(_user_id="paired-user")
+
+    assert capture.capture_owner_directive(guest, "Rewrite the rules.", turn_id="guest") == {
+        "recorded": False,
+        "reason": "not_explicit_owner",
+    }
+    assert capture.build_owner_authority_prompt(guest) == ""
+    assert called == []

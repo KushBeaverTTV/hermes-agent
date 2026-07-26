@@ -13,6 +13,7 @@ def runtime_argv(inspect_data: list[dict[str, Any]]) -> list[str]:
         raise ValueError(f"expected one container inspection, got {len(inspect_data)}")
     obj = inspect_data[0]
     host = obj.get("HostConfig") or {}
+    config = obj.get("Config") or {}
     args: list[str] = ["--restart", "unless-stopped"]
 
     for bind in host.get("Binds") or []:
@@ -37,9 +38,28 @@ def runtime_argv(inspect_data: list[dict[str, Any]]) -> list[str]:
                 published = f"{host_ip}:{published}"
             args.extend(["-p", published])
 
-    network = str(host.get("NetworkMode") or "")
-    if network and network not in {"default", "bridge"}:
-        args.extend(["--network", network])
+    container_name = str(obj.get("Name") or "").lstrip("/")
+    networks = ((obj.get("NetworkSettings") or {}).get("Networks") or {})
+    if networks:
+        for network_name, settings in sorted(networks.items()):
+            if network_name in {"default", "bridge"}:
+                continue
+            args.extend(["--network", str(network_name)])
+            aliases = (settings or {}).get("Aliases") or []
+            for alias in aliases:
+                alias = str(alias or "").strip()
+                if alias and alias != container_name:
+                    args.extend(["--network-alias", alias])
+    else:
+        network = str(host.get("NetworkMode") or "")
+        if network and network not in {"default", "bridge"}:
+            args.extend(["--network", network])
+
+    # Routing labels are public Traefik configuration. Preserve only that
+    # allowlisted namespace so arbitrary metadata can never replay secrets.
+    for key, value in sorted((config.get("Labels") or {}).items()):
+        if str(key).startswith("traefik."):
+            args.extend(["--label", f"{key}={value}"])
 
     for value in host.get("ExtraHosts") or []:
         args.extend(["--add-host", str(value)])

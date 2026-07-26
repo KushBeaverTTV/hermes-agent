@@ -46,7 +46,7 @@ def test_vendor_manifest_is_machine_verifiable():
 def test_deploy_runbook_defaults_to_plan_and_guards_live_mutation():
     source = RUNBOOK.read_text(encoding="utf-8")
     default_mode = 'MODE="${AURORA_DEPLOY_MODE:-plan}"'
-    approval_guard = 'AURORA_CUTOVER_APPROVED' 
+    approval_guard = '[[ "$AURORA_CUTOVER_APPROVED" == "YES:$GIT_SHA" ]]'
 
     assert default_mode in source
     assert 'plan)' in source
@@ -57,6 +57,16 @@ def test_deploy_runbook_defaults_to_plan_and_guards_live_mutation():
     for mutation in ('docker stop "$CONTAINER"', 'docker rename "$CONTAINER"'):
         assert guard_index < source.index(mutation)
     assert "PLAN PASS: no build, stop, rename, run, restart, or cutover performed" in source
+
+
+def test_manual_rollback_is_sha_bound_and_health_wait_exceeds_docker_budget():
+    source = RUNBOOK.read_text(encoding="utf-8")
+
+    assert 'AURORA_ROLLBACK_APPROVED="${AURORA_ROLLBACK_APPROVED:-}"' in source
+    assert 'DEPLOYMENT_SHA="${2:-${AURORA_ROLLBACK_SHA:-$GIT_SHA}}"' in source
+    assert '[[ "$AURORA_ROLLBACK_APPROVED" == "YES:$DEPLOYMENT_SHA" ]]' in source
+    assert 'RECEIPT_DIR="$RECEIPT_ROOT/$DEPLOYMENT_SHA"' in source
+    assert 'for _ in {1..48}; do' in source
 
 
 def test_deploy_runbook_derives_host_data_mount_instead_of_assuming_host_opt_data():

@@ -16,7 +16,7 @@ case "${1:-}" in
   --prepare) MODE=prepare ;;
   --cutover) MODE=cutover ;;
   --rollback) MODE=rollback ;;
-  *) echo "usage: $0 [--plan|--prepare|--cutover|--rollback]" >&2; exit 2 ;;
+  *) echo "usage: $0 [--plan|--prepare|--cutover|--rollback [DEPLOYMENT_SHA]]" >&2; exit 2 ;;
 esac
 
 cd "$ROOT"
@@ -28,11 +28,21 @@ DIRTY="$(git status --porcelain=v1 --untracked-files=all)"
 }
 python3 scripts/validate-aurora-image-context.py --root "$ROOT"
 GIT_SHA="$(git rev-parse HEAD)"
+if [[ "$MODE" == rollback ]]; then
+  DEPLOYMENT_SHA="${2:-${AURORA_ROLLBACK_SHA:-$GIT_SHA}}"
+else
+  DEPLOYMENT_SHA="$GIT_SHA"
+fi
+[[ "$DEPLOYMENT_SHA" =~ ^[0-9a-f]{40}$ ]] || {
+  echo "INVALID: deployment SHA must be 40 lowercase hex characters" >&2
+  exit 1
+}
 BASE_IMAGE="hermes-upstream:${GIT_SHA}"
 IMAGE="aurora-hermes:${GIT_SHA}"
-RECEIPT_DIR="$RECEIPT_ROOT/$GIT_SHA"
-ROLLBACK_CONTAINER="${CONTAINER}-rollback-${GIT_SHA:0:12}"
+RECEIPT_DIR="$RECEIPT_ROOT/$DEPLOYMENT_SHA"
+ROLLBACK_CONTAINER="${CONTAINER}-rollback-${DEPLOYMENT_SHA:0:12}"
 AURORA_CUTOVER_APPROVED="${AURORA_CUTOVER_APPROVED:-}"
+AURORA_ROLLBACK_APPROVED="${AURORA_ROLLBACK_APPROVED:-}"
 
 make_context() {
   CONTEXT_DIR="$(mktemp -d)"
@@ -199,7 +209,7 @@ case "$MODE" in
       "${RUNTIME_ARGS[@]}" --env-file "$ENV_FILE" "$IMAGE"
 
     health=starting
-    for _ in {1..24}; do
+    for _ in {1..48}; do
       health="$(docker inspect --format='{{.State.Health.Status}}' "$CONTAINER")"
       [[ "$health" == healthy ]] && break
       [[ "$health" == unhealthy ]] && { docker logs --tail 100 "$CONTAINER" >&2; false; }
@@ -211,10 +221,14 @@ case "$MODE" in
     rollback_ready=0
     echo "CUTOVER PASS image=$IMAGE health=$health"
     echo "Exact rollback container retained: $ROLLBACK_CONTAINER"
-    echo "Rollback command: $0 --rollback"
+    echo "Rollback command: AURORA_ROLLBACK_APPROVED=YES:$GIT_SHA $0 --rollback $GIT_SHA"
     ;;
 
   rollback)
+    [[ "$AURORA_ROLLBACK_APPROVED" == "YES:$DEPLOYMENT_SHA" ]] || {
+      echo "INVALID: rollback requires AURORA_ROLLBACK_APPROVED=YES:$DEPLOYMENT_SHA" >&2
+      exit 1
+    }
     require_docker
     rollback_saved_container
     ;;
