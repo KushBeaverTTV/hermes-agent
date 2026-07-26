@@ -1,0 +1,19 @@
+language: en-US
+
+reviews:
+  profile: assertive
+  request_changes_workflow: true
+  high_level_summary: true
+  path_instructions:
+    - path: "gateway/**"
+      instructions: |
+        Treat owner authorization, pairing separation, queue preemption, drain behavior,
+        startup sentinels, process control, and rollback as security/reliability boundaries.
+        Flag any fail-open identity path, alternate-ID escalation, wildcard escalation,
+        pairing-to-owner escalation, stale-work merge, lost owner turn, unsafe interruption,
+        or behavior setting that bypasses config.yaml.
+    - path: "tests/gateway/**"
+      instructions: |
+        Require adversarial coverage for exact primary identity matching, negative authorization
+        cases, queue ordering and caps, startup/drain behavior, media/internal-event exclusion,
+        config loading, and pairing non-escalation. Reject mocks that bypass the production path.

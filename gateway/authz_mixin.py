@@ -344,6 +344,59 @@ class GatewayAuthorizationMixin:
             return per_profile[profile]
         return getattr(self, "pairing_store", None)
 
+    def _is_explicit_owner_source(self, source: SessionSource) -> bool:
+        """Return whether *source* is an exact config-declared owner.
+
+        This is deliberately narrower than ``_is_user_authorized``. Pairing,
+        roles, chat allowlists, and allow-all flags grant conversation access;
+        they do not grant control-plane authority over an active agent turn.
+        User-controlled display labels are never considered. Owner authority is
+        read only from ``gateway.platforms.<platform>.extra.owner_user_ids`` in
+        config.yaml; pairing never mutates that security boundary.
+        """
+        if source is None or getattr(source, "is_bot", False) is True:
+            return False
+        raw_platform = getattr(source, "platform", None)
+        platform_name = getattr(raw_platform, "value", None)
+        if not platform_name:
+            return False
+        user_id = str(getattr(source, "user_id", None) or "").strip()
+        if not user_id:
+            return False
+        try:
+            platform = (
+                raw_platform
+                if isinstance(raw_platform, Platform)
+                else Platform(str(platform_name))
+            )
+        except (TypeError, ValueError):
+            return False
+        # Resolve owner authority from the transport-owning profile. A stamped
+        # secondary profile is an authorization boundary and must never inherit
+        # the default runner/platform owner list.
+        raw_owner_ids = None
+        transport_profile = self._adapter_profile_for_source(source)
+        profile_name = (transport_profile or "").strip() or None
+        is_secondary_profile = bool(profile_name and profile_name != "default")
+        adapter = self._authorization_adapter(raw_platform, transport_profile)
+        adapter_extra = getattr(getattr(adapter, "config", None), "extra", None)
+        if isinstance(adapter_extra, dict) and "owner_user_ids" in adapter_extra:
+            raw_owner_ids = adapter_extra.get("owner_user_ids")
+
+        if is_secondary_profile:
+            if raw_owner_ids is None:
+                return False
+        elif raw_owner_ids is None:
+            config = getattr(self, "config", None)
+            platforms = getattr(config, "platforms", None)
+            platform_config = platforms.get(platform) if isinstance(platforms, dict) else None
+            platform_extra = getattr(platform_config, "extra", None)
+            if isinstance(platform_extra, dict):
+                raw_owner_ids = platform_extra.get("owner_user_ids")
+
+        allowed = _coerce_allow_set(raw_owner_ids) - {"*"}
+        return user_id in allowed
+
     def _is_user_authorized(self, source: SessionSource) -> bool:
         """
         Check if a user is authorized to use the bot.

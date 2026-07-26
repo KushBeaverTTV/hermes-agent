@@ -1,0 +1,76 @@
+{
+  "project_id": "aurora-hermes-stock-overlay",
+  "project_root": "/opt/data/worktrees/hermes-stock-upgraded",
+  "archive_root": "/opt/data/archives/hermes-stock-rescue",
+  "code_roots": [
+    "agent",
+    "gateway"
+  ],
+  "source_roots": [
+    "tests/agent",
+    "tests/gateway"
+  ],
+  "authoritative_docs": [
+    "AURORA-STOCK-OVERLAY.md"
+  ],
+  "excluded_doc_roots": [
+    ".github",
+    ".plans",
+    ".pytest_cache",
+    "apps",
+    "contributors",
+    "docker",
+    "docs",
+    "gateway",
+    "native",
+    "optional-skills",
+    "plugins",
+    "providers",
+    "scripts",
+    "skills",
+    "tests",
+    "ui-tui",
+    "web",
+    "website",
+    "AGENTS.md",
+    "CONTRIBUTING.es.md",
+    "CONTRIBUTING.md",
+    "README.es.md",
+    "README.md",
+    "README.ur-pk.md",
+    "README.zh-CN.md",
+    "SECURITY.es.md",
+    "SECURITY.md",
+    "hermes-already-has-routines.md",
+    "relatorio-issue-69678-sqlite-fd-leaks.md"
+  ],
+  "forbidden_history_roots": [
+    "campaign",
+    "receipts"
+  ],
+  "tied_skills": [],
+  "skill_roots": [],
+  "mcp_configs": [],
+  "acp_configs": [],
+  "orchestration_configs": [],
+  "dynamic_truth_sources": [
+    "PROJECT-MAP.json"
+  ],
+  "reusable_script_roots": [],
+  "forbidden_active_doc_patterns": [],
+  "path_reference_exceptions": [],
+  "doc_path_bases": {},
+  "validation": {
+    "integrity_validator": "/opt/data/skills/software-development/agent-layers-closeout/scripts/validate_project_integrity.py",
+    "immutable_stock_base": "78c06525e8e955e06a007b07b347c679f3977c3e",
+    "focused_selection": [
+      "tests/gateway/test_subagent_protection_30170.py",
+      "tests/gateway/test_priority_path_compression_demotion_56391.py"
+    ],
+    "broad_selection": [
+      "tests/agent",
+      "tests/gateway"
+    ],
+    "external_receipt_root": "/opt/data/archives/hermes-stock-rescue/2026-07-25"
+  }
+}
