@@ -62,15 +62,24 @@ def _tracked_text_paths(root: Path) -> list[Path]:
     result = subprocess.run(
         ["git", "ls-files", "-z"],
         cwd=root,
-        check=True,
+        check=False,
         capture_output=True,
     )
-    rels = [Path(item.decode("utf-8")) for item in result.stdout.split(b"\0") if item]
+    if result.returncode == 0:
+        rels = [Path(item.decode("utf-8")) for item in result.stdout.split(b"\0") if item]
+        candidates = [root / rel for rel in rels]
+    else:
+        # A git archive is intentionally metadata-free. Traverse only files
+        # physically present in that exported context and never follow symlinks.
+        candidates = sorted(
+            (path for path in root.rglob("*") if path.is_file() and not path.is_symlink()),
+            key=lambda path: path.relative_to(root).as_posix(),
+        )
     paths: list[Path] = []
-    for rel in rels:
-        path = root / rel
-        if not path.is_file():
+    for path in candidates:
+        if not path.is_file() or path.is_symlink():
             continue
+        rel = path.relative_to(root)
         if rel.name.startswith("Dockerfile") or rel.suffix.lower() in _TEXT_SUFFIXES:
             paths.append(path)
     return paths

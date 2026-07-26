@@ -49,9 +49,17 @@ def _run(root: Path) -> subprocess.CompletedProcess[str]:
         capture_output=True,
     )
 
-
 def test_clean_minimal_context_passes(tmp_path):
-    result = _run(_fixture(tmp_path))
+    root = _fixture(tmp_path)
+    result = _run(root)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "AURORA-IMAGE-CONTEXT PASS" in result.stdout
+
+
+def test_clean_export_without_git_metadata_passes(tmp_path):
+    root = _fixture(tmp_path)
+    shutil.rmtree(root / ".git")
+    result = _run(root)
     assert result.returncode == 0, result.stdout + result.stderr
     assert "AURORA-IMAGE-CONTEXT PASS" in result.stdout
 
