@@ -4832,7 +4832,8 @@ function closePreviewWatchers() {
 // URL for the life of the process. Used by the oauth pre-flight guard to tell
 // a password-provider gateway (which cannot satisfy the bearer/cookie checks
 // by design) from a real OAuth one. Any failure returns [] so callers keep the
-// strict guard — backends predating /api/auth/providers are unaffected.
+// strict guard, but remains retryable; backends predating /api/auth/providers
+// are unaffected.
 const gatewayAuthProvidersCache = new Map<string, any[]>()
 
 async function gatewayAuthProviders(baseUrl) {
@@ -4853,11 +4854,11 @@ async function gatewayAuthProviders(baseUrl) {
         .map(p => ({ name: String(p.name || ''), supportsPassword: Boolean(p.supports_password) }))
         .filter(p => p.name)
     }
-  } catch {
-    // Optional metadata — an unreadable list keeps the strict guard.
-  }
 
-  gatewayAuthProvidersCache.set(baseUrl, providers)
+    gatewayAuthProvidersCache.set(baseUrl, providers)
+  } catch {
+    // Optional metadata — an unreadable list keeps the strict guard and retries later.
+  }
 
   return providers
 }

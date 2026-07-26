@@ -511,6 +511,19 @@ class TestInsightsPopulated:
         assert activity["busiest_day"] is not None
         assert activity["busiest_hour"] is not None
 
+    def test_activity_patterns_coerces_and_skips_bad_timestamps(self, db):
+        engine = InsightsEngine(db)
+        activity = engine._compute_activity_patterns([
+            {"started_at": "2024-01-02T03:04:05+00:00"},
+            {"started_at": "not-a-timestamp"},
+            {"started_at": 10**100},
+            {"started_at": float("nan")},
+        ])
+
+        assert sum(item["count"] for item in activity["by_day"]) == 1
+        assert sum(item["count"] for item in activity["by_hour"]) == 1
+        assert activity["active_days"] == 1
+
     def test_top_sessions(self, populated_db):
         engine = InsightsEngine(populated_db)
         report = engine.generate(days=30)

@@ -601,7 +601,11 @@ def _stored_prompt_matches_runtime(agent, prompt: str) -> bool:
     # rejected (they would always differ from the launch dir's os.getcwd()).
     stored_cwd = host_info_value("Current working directory")
     if stored_cwd:
-        if stored_cwd != str(resolve_agent_cwd()):
+        try:
+            current_cwd = str(resolve_agent_cwd())
+        except OSError:
+            return False
+        if stored_cwd != current_cwd:
             return False
 
     # Detect runtime-surface drift: the stored prompt records which platform it

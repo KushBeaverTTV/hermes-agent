@@ -1154,3 +1154,26 @@ def test_pending_replay_rechecks_authority_before_write(store):
 
     assert result["status"] == "authority_rejected"
     assert store.memory_entries == []
+
+
+def test_legacy_memory_rejects_write_when_authority_import_is_unavailable(store):
+    real_import = __import__
+
+    def missing_authority(name, globals=None, locals=None, fromlist=(), level=0):
+        if name == "mnemosyne.authority":
+            raise ImportError("simulated missing authority dependency")
+        return real_import(name, globals, locals, fromlist, level)
+
+    with patch("builtins.__import__", side_effect=missing_authority):
+        result = json.loads(memory_tool(
+            action="add",
+            target="memory",
+            content="Remember this only when authority checks are available.",
+            store=store,
+        ))
+
+    assert result["success"] is False
+    assert result["status"] == "authority_rejected"
+    assert result["_authority_rejected"] is True
+    assert result["authority"]["reason"] == "authority_unavailable"
+    assert store.memory_entries == []

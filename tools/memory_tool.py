@@ -1062,13 +1062,27 @@ def _missing_old_text_error(store: "MemoryStore", target: str, action: str) -> s
     )
 
 
-def _authority_rejection_result(decision) -> str:
+def _authority_rejection_result(decision=None) -> str:
+    authority = (
+        decision.to_dict()
+        if decision is not None
+        else {
+            "allowed": False,
+            "reason": "authority_unavailable",
+            "source": "memory_tool",
+        }
+    )
+    error = (
+        "Memory mutation rejected by a newer explicit owner directive."
+        if decision is not None
+        else "Memory mutation rejected because authority checks are unavailable."
+    )
     return json.dumps({
         "success": False,
         "status": "authority_rejected",
-        "error": "Memory mutation rejected by a newer explicit owner directive.",
+        "error": error,
         "_authority_rejected": True,
-        "authority": decision.to_dict(),
+        "authority": authority,
     }, ensure_ascii=False)
 
 
@@ -1082,10 +1096,13 @@ def _authority_gate_legacy_memory(
     operations: Optional[List[Dict[str, Any]]] = None,
 ) -> Optional[str]:
     """Gate MEMORY.md/USER.md writes, including background-review and replay paths."""
-    from mnemosyne.authority import (
-        check_lower_authority_removal,
-        check_lower_authority_write,
-    )
+    try:
+        from mnemosyne.authority import (
+            check_lower_authority_removal,
+            check_lower_authority_write,
+        )
+    except ImportError:
+        return _authority_rejection_result()
 
     ops = operations or [{"action": action, "content": content, "old_text": old_text}]
     existing_entries = store._entries_for(target)

@@ -502,6 +502,23 @@ class TestStoredPromptCwdDrift:
                 "Expected True when stored cwd matches current cwd"
             )
 
+    def test_stored_prompt_stale_when_cwd_resolution_fails(self):
+        """An unreadable runtime cwd must be treated as a cache miss."""
+        from agent.conversation_loop import _stored_prompt_matches_runtime
+
+        agent = self._make_agent()
+        stored_prompt = (
+            self._host_block("/project/current")
+            + "Model: test/model\n"
+            "Provider: openrouter\n"
+        )
+
+        with patch(
+            "agent.conversation_loop.resolve_agent_cwd",
+            side_effect=OSError("cwd unavailable"),
+        ):
+            assert _stored_prompt_matches_runtime(agent, stored_prompt) is False
+
     def test_project_context_cannot_force_a_rebuild(self):
         """🔴 CACHE INVARIANT: user project text must never invalidate the prompt.
 

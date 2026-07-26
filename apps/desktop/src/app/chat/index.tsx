@@ -3,7 +3,7 @@ import { useStore } from '@nanostores/react'
 import { useQuery } from '@tanstack/react-query'
 import type { ReadableAtom } from 'nanostores'
 import type * as React from 'react'
-import { Suspense, useCallback, useEffect, useMemo, useState } from 'react'
+import { Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useState } from 'react'
 import { useLocation } from 'react-router-dom'
 
 import type { SubmitTextOptions } from '@/app/session/hooks/use-prompt-actions/utils'
@@ -189,6 +189,10 @@ const NO_MESSAGES: ChatMessage[] = []
 function useMessagesWhileVisible($messages: ReadableAtom<ChatMessage[]>): ChatMessage[] {
   const visible = usePaneVisible()
   const [messages, setMessages] = useState(() => $messages.get())
+
+  // Session swaps replace the atom. Sync before paint so a hidden or already-
+  // loaded session never renders the previous session's transcript for a frame.
+  useLayoutEffect(() => setMessages($messages.get()), [$messages])
 
   // nanostores types the listener value ReadonlyIfObject; the store publishes
   // a fresh array per flush, so the cast is safe and avoids a per-token clone.

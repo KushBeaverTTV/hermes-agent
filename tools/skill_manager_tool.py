@@ -1414,7 +1414,23 @@ def _apply_owner_authority_gate(action: str, name: str, **payload_kwargs):
     candidate = _skill_authority_candidate(action, name, **payload_kwargs)
     if not candidate.strip():
         return None
-    from mnemosyne.authority import check_lower_authority_write
+    try:
+        from mnemosyne.authority import check_lower_authority_write
+    except ImportError:
+        return json.dumps(
+            {
+                "success": False,
+                "error": "Skill mutation rejected because authority checks are unavailable.",
+                "status": "authority_rejected",
+                "_authority_rejected": True,
+                "authority": {
+                    "allowed": False,
+                    "reason": "authority_unavailable",
+                    "source": "skill_manager_tool",
+                },
+            },
+            ensure_ascii=False,
+        )
 
     try:
         from tools.write_approval import current_origin

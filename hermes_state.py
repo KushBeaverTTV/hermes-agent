@@ -928,7 +928,9 @@ def repair_state_db_schema(db_path: Path, *, backup: bool = True) -> Dict[str, A
          canonical ``messages`` table.
 
     Canonical ``sessions`` / ``messages`` rows are never modified. A
-    timestamped raw backup is taken first unless ``backup=False``.
+    timestamped raw backup is taken first unless ``backup=False``; when a
+    requested backup cannot be created, repair fails closed before modifying
+    the database.
 
     Returns a report dict: ``{repaired: bool, strategy: str|None,
     backup_path: str|None, error: str|None}``.
@@ -952,7 +954,13 @@ def repair_state_db_schema(db_path: Path, *, backup: bool = True) -> Dict[str, A
 
     if backup:
         bpath = _backup_db_file(db_path)
-        report["backup_path"] = str(bpath) if bpath else None
+        if bpath is None:
+            report["error"] = (
+                "Requested backup could not be created; refusing to modify "
+                f"{db_path}"
+            )
+            return report
+        report["backup_path"] = str(bpath)
 
     # ── Strategy 0: rebuild FTS indexes in place (FTS write-corruption) ──
     # The FTS5 'rebuild' command rewrites the internal index from the canonical

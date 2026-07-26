@@ -802,10 +802,13 @@ class InsightsEngine:
         daily_counts = Counter()  # date string -> count
 
         for s in sessions:
-            ts = s.get("started_at")
-            if not ts:
+            ts = _coerce_timestamp(s.get("started_at"))
+            if ts is None:
                 continue
-            dt = datetime.fromtimestamp(ts)
+            try:
+                dt = datetime.fromtimestamp(ts)
+            except (OSError, OverflowError, ValueError):
+                continue
             day_counts[dt.weekday()] += 1
             hour_counts[dt.hour] += 1
             daily_counts[dt.strftime("%Y-%m-%d")] += 1

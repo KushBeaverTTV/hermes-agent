@@ -131,17 +131,21 @@ def _terminate_listener_pid(pid: int, port: int) -> None:
     pidfd_open = getattr(os, "pidfd_open", None)
     pidfd_send_signal = getattr(signal, "pidfd_send_signal", None)
     if pidfd_open is not None and pidfd_send_signal is not None:
-        fd = pidfd_open(pid, 0)
         try:
-            if pid not in _listener_pids_on_port(port):
-                return
-            pidfd_send_signal(fd, signal.SIGTERM, None, 0)
-        finally:
-            os.close(fd)
-        return
+            fd = pidfd_open(pid, 0)
+        except OSError:
+            pass
+        else:
+            try:
+                if pid not in _listener_pids_on_port(port):
+                    return
+                pidfd_send_signal(fd, signal.SIGTERM, None, 0)
+            finally:
+                os.close(fd)
+            return
 
-    # Non-Linux fallback: narrow the unavoidable race by revalidating
-    # immediately before signalling. Linux uses the stable pidfd path above.
+    # Fallback when pidfds are unavailable or unusable: narrow the unavoidable
+    # race by revalidating immediately before signalling.
     if pid in _listener_pids_on_port(port):
         os.kill(pid, signal.SIGTERM)
 

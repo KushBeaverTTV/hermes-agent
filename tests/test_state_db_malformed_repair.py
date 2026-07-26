@@ -84,6 +84,52 @@ def test_repair_preserves_sessions_and_messages(tmp_path):
     conn.close()
 
 
+def test_repair_aborts_before_surgery_when_requested_backup_is_refused(tmp_path):
+    """A live connection must make requested-backup failure fail closed."""
+    from hermes_cli.sqlite_safe_read import connect_tracked
+
+    db_path = tmp_path / "state.db"
+    _build_healthy_db(db_path)
+    _corrupt_duplicate_fts(db_path)
+
+    live = connect_tracked(db_path)
+    try:
+        report = repair_state_db_schema(db_path)
+    finally:
+        live.close()
+
+    assert report["repaired"] is False
+    assert report["strategy"] is None
+    assert report["backup_path"] is None
+    assert "backup" in report["error"].lower()
+
+    # The duplicate schema row is still present: no sqlite_master surgery ran.
+    probe = sqlite3.connect(str(db_path), isolation_level=None)
+    probe.execute("PRAGMA writable_schema=ON")
+    duplicate_count = probe.execute(
+        "SELECT COUNT(*) FROM sqlite_master WHERE name='messages_fts'"
+    ).fetchone()[0]
+    probe.close()
+    assert duplicate_count == 2
+
+
+def test_explicit_backup_skip_still_allows_repair(tmp_path, monkeypatch):
+    """backup=False intentionally opts out and must still permit surgery."""
+    db_path = tmp_path / "state.db"
+    _build_healthy_db(db_path)
+    _corrupt_duplicate_fts(db_path)
+
+    def unexpected_backup(_path):
+        pytest.fail("_backup_db_file must not run when backup=False")
+
+    monkeypatch.setattr(hermes_state, "_backup_db_file", unexpected_backup)
+    report = repair_state_db_schema(db_path, backup=False)
+
+    assert report["repaired"] is True
+    assert report["strategy"] in {"dedup_schema", "drop_fts_rebuild"}
+    assert report["backup_path"] is None
+
+
 def test_repaired_db_search_works(tmp_path):
     db_path = tmp_path / "state.db"
     _build_healthy_db(db_path)
@@ -307,6 +353,7 @@ def test_fts_read_corruption_detected_by_read_probe(tmp_path):
     assert (
         "malformed" in reason_l
         or "database disk image" in reason_l
+        or "vtable constructor failed" in reason_l
         or ("fts5" in reason_l and "corrupt" in reason_l)
     )
 

@@ -579,6 +579,19 @@ class TestKillPortProcess:
         mock_send.assert_called_once_with(77, signal.SIGTERM, None, 0)
         mock_close.assert_called_once_with(77)
 
+    def test_pidfd_open_error_falls_back_to_revalidated_kill(self):
+        from plugins.platforms.whatsapp import adapter as wa
+
+        with patch.object(wa.os, "pidfd_open", side_effect=OSError("unsupported"), create=True), \
+             patch.object(wa.signal, "pidfd_send_signal", create=True) as mock_send, \
+             patch("plugins.platforms.whatsapp.adapter._listener_pids_on_port", return_value=[55555]) as mock_listeners, \
+             patch.object(wa.os, "kill") as mock_kill:
+            wa._terminate_listener_pid(55555, 3000)
+
+        mock_listeners.assert_called_once_with(3000)
+        mock_kill.assert_called_once_with(55555, signal.SIGTERM)
+        mock_send.assert_not_called()
+
     def test_no_kill_when_no_listener_on_port(self):
         """No LISTENer on the port → nothing is signalled."""
         from plugins.platforms.whatsapp import adapter as wa

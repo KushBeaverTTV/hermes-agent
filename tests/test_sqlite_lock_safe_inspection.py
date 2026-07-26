@@ -225,13 +225,15 @@ def test_probe_and_connect_do_not_race(tmp_path, clean_registry, monkeypatch):
 
     Deterministic interleaving: pause the probe *inside* the byte read — after
     it has decided "nothing is live" and opened its descriptor — then let
-    another thread open a tracked connection and take a write lock, then let
-    the probe close.
+    another thread attempt to open a tracked connection. An observed failed
+    non-blocking acquisition proves that thread reached the guard while the
+    probe held it and releases the probe immediately; no deadlock timeout is
+    part of the successful path.
 
-    With the guard holding ``_live_lock`` across check+open+read+close, the
-    other thread blocks on that lock until the probe is done, so no
-    interleaving is possible. If the lock is only held across the check, that
-    thread slips in and the probe's ``close()`` cancels its POSIX locks.
+    If the lock is only held across the check, the connection opener does not
+    contend, takes a write lock inside the probe's window, and then lets the
+    probe close. That close cancels its POSIX locks and lets the external writer
+    break in.
     """
     import hermes_cli.sqlite_safe_read as ssr
 
@@ -240,36 +242,59 @@ def test_probe_and_connect_do_not_race(tmp_path, clean_registry, monkeypatch):
 
     inside_read = threading.Event()
     may_close = threading.Event()
+    guard_contended = threading.Event()
     failures: list[str] = []
     real_open = open
+    real_lock = ssr._live_lock
+
+    class ObservableRLock:
+        """Expose real cross-thread contention without changing lock semantics."""
+
+        def __enter__(self):
+            if not real_lock.acquire(blocking=False):
+                guard_contended.set()
+                may_close.set()
+                real_lock.acquire()
+            return self
+
+        def __exit__(self, exc_type, exc_value, traceback):
+            real_lock.release()
 
     def slow_open(*args, **kwargs):
         handle = real_open(*args, **kwargs)
         inside_read.set()
-        # Hold the descriptor open while the writer tries to get in.
-        may_close.wait(10)
+        # The writer's guard contention releases this promptly on the correct
+        # path. The timeout is only a bounded failure, never synchronization.
+        if not may_close.wait(2):
+            handle.close()
+            raise AssertionError("writer never reached the probe's guard")
         return handle
 
     def writer():
-        inside_read.wait(10)
+        if not inside_read.wait(2):
+            failures.append("byte-read hook never fired")
+            return
         # If the guard is correct this blocks until the probe releases the
         # lock; if not, it opens and locks inside the probe's window.
-        conn = ssr.connect_tracked(db, isolation_level=None, timeout=0.5)
+        conn = None
         try:
+            conn = ssr.connect_tracked(db, isolation_level=None, timeout=0.5)
             conn.execute("BEGIN IMMEDIATE")
             conn.execute("INSERT INTO t(v) VALUES ('holder')")
-            may_close.set()  # let the probe's close() land
+            may_close.set()  # broken guard: let the probe's close() land
             if _external_writer_can_break_in(db):
                 failures.append(
                     "external writer broke in: the probe's close() cancelled "
                     "this connection's POSIX locks"
                 )
             conn.execute("COMMIT")
-        except sqlite3.Error as exc:  # a cancelled lock surfaces here too
+        except Exception as exc:  # a cancelled lock surfaces here too
             failures.append(f"holder transaction failed: {exc}")
         finally:
-            conn.close()
+            if conn is not None:
+                conn.close()
 
+    monkeypatch.setattr(ssr, "_live_lock", ObservableRLock())
     monkeypatch.setattr(ssr, "open", slow_open, raising=False)
     t = threading.Thread(target=writer, daemon=True)
     t.start()
@@ -277,8 +302,11 @@ def test_probe_and_connect_do_not_race(tmp_path, clean_registry, monkeypatch):
         read_header_bytes_preopen(db, length=16)
     finally:
         may_close.set()  # never wedge the probe if the writer died
-    t.join(20)
+    t.join(2)
 
+    assert inside_read.is_set(), "byte-read hook never fired"
+    assert guard_contended.is_set(), "connection opener did not contend on probe guard"
+    assert not t.is_alive(), "writer thread did not finish"
     assert not failures, failures[0]
 
 

@@ -1792,6 +1792,32 @@ class TestOwnerAuthorityGate:
         assert result["authority"]["directive_id"] == "owner-1"
         assert not (tmp_path / "unsafe-skill").exists()
 
+    def test_missing_authority_module_rejects_with_json_without_writing(
+        self, tmp_path, monkeypatch
+    ):
+        import builtins
+
+        real_import = builtins.__import__
+
+        def blocked_authority(name, *args, **kwargs):
+            if name == "mnemosyne.authority":
+                raise ImportError("authority unavailable")
+            return real_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", blocked_authority)
+        with _skill_dir(tmp_path):
+            raw = skill_manage(
+                "create",
+                "authority-unavailable",
+                content=_skill_content("authority-unavailable"),
+            )
+
+        result = json.loads(raw)
+        assert result["success"] is False
+        assert result["status"] == "authority_rejected"
+        assert result["authority"]["reason"] == "authority_unavailable"
+        assert not (tmp_path / "authority-unavailable").exists()
+
     def test_nonconflicting_skill_create_reaches_normal_write_path(self, tmp_path):
         from mnemosyne.authority import AuthorityDecision
 
