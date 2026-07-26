@@ -5,6 +5,7 @@
 set -eu
 
 PY=/opt/hermes/.venv/bin/python3
+EXPECTED_GATEWAY_SOURCE=/opt/hermes/gateway/run.py
 fail() { echo "AURORA-STARTUP-FAIL: $*" >&2; exit 1; }
 
 # 1. Fixed sqlite branch
@@ -32,6 +33,10 @@ assert md.version("mnemosyne-hermes") == "0.5.2", md.version("mnemosyne-hermes")
 print("AURORA-STARTUP: mnemosyne core=3.14.2 provider=0.5.2 OK")
 PY
 
+"$PY" /opt/aurora/vendor-context/scripts/verify-aurora-vendor-manifest.py \
+  --root /opt/aurora/vendor-context \
+  || fail "vendor manifest mismatch"
+
 # 4. Owner authority source and immutable build identity present
 [ -s /opt/hermes/.hermes_build_sha ] || fail "base build SHA missing"
 [ -s /opt/aurora-authority-sha ] || fail "authority build SHA missing"
@@ -39,7 +44,11 @@ cmp -s /opt/hermes/.hermes_build_sha /opt/aurora-authority-sha \
   || fail "base/authority SHA mismatch"
 "$PY" -c "from agent.owner_directive_capture import is_explicit_owner_source" 2>/dev/null \
   || fail "owner authority capture missing"
-grep -q "owner_supersedes = is_explicit_owner_source" /opt/hermes/gateway/run.py \
+ACTUAL_GATEWAY_SOURCE="$($PY -c 'import pathlib, gateway.run; print(pathlib.Path(gateway.run.__file__).resolve())')" \
+  || fail "gateway source import failed"
+[ "$ACTUAL_GATEWAY_SOURCE" = "$EXPECTED_GATEWAY_SOURCE" ] \
+  || fail "gateway source mismatch: $ACTUAL_GATEWAY_SOURCE"
+grep -q "owner_supersedes = is_explicit_owner_source" "$EXPECTED_GATEWAY_SOURCE" \
   || fail "owner gateway control-plane wiring missing"
 echo "AURORA-STARTUP: owner authority SHA $(cat /opt/aurora-authority-sha) OK"
 
@@ -49,4 +58,4 @@ for f in /opt/hermes/.env /opt/hermes/auth.json; do
 done
 echo "AURORA-STARTUP: no embedded secrets OK"
 
-echo "AURORA-STARTUP: all identity checks passed"
+echo "AURORA STARTUP CHECK PASS"

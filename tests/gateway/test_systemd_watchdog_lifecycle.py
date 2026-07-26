@@ -66,9 +66,17 @@ def test_gateway_ready_follows_background_service_startup():
 
     housekeeping_started = source.index("housekeeping_thread.start()")
     watchdog_started = source.index("start_watchdog()")
-    shutdown_wait = source.index("await runner.wait_for_shutdown()", watchdog_started)
+    readiness_written = source.index("write_gateway_readiness(")
+    shutdown_wait = source.index("await runner.wait_for_shutdown()", readiness_written)
+    readiness_removed = source.index("remove_gateway_readiness(", shutdown_wait)
 
-    assert housekeeping_started < watchdog_started < shutdown_wait
+    assert (
+        housekeeping_started
+        < watchdog_started
+        < readiness_written
+        < shutdown_wait
+        < readiness_removed
+    )
 
 
 @pytest.mark.asyncio

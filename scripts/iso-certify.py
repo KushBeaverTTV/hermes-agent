@@ -124,7 +124,10 @@ def seed_scratch_home(home: Path, *, isolation: str, heartbeat_secs: int, respaw
 
     (home / "config.yaml").write_text(yaml.safe_dump(cfg, sort_keys=True), encoding="utf-8")
     # A stub .env so credential resolution doesn't spelunk the real home.
-    (home / ".env").write_text("OPENAI_API_KEY=sk-synthetic-not-used\n", encoding="utf-8")
+    (home / ".env").write_text(
+        "OPENAI_API_KEY=sk-synthetic-not-used\n",  # aurora-secret-scan: ok -- hermetic stub
+        encoding="utf-8",
+    )
 
 
 # ── dashboard process ───────────────────────────────────────────────────

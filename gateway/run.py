@@ -69,6 +69,7 @@ from agent.conversation_loop import INTERRUPT_WAITING_FOR_MODEL_PREFIX
 from agent.i18n import t
 from hermes_cli.config import cfg_get
 from hermes_cli.fallback_config import get_fallback_chain
+from gateway.readiness import remove_gateway_readiness, write_gateway_readiness
 
 # --- Agent cache tuning ---------------------------------------------------
 # Bounds the per-session AIAgent cache to prevent unbounded growth in
@@ -24448,8 +24449,11 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
     if callable(start_watchdog):
         start_watchdog()
 
-    # Wait for shutdown
-    await runner.wait_for_shutdown()
+    write_gateway_readiness(adapters=runner.adapters)
+    try:
+        await runner.wait_for_shutdown()
+    finally:
+        remove_gateway_readiness()
 
     try:
         from hermes_cli.nous_auth_keepalive import stop_nous_auth_keepalive
