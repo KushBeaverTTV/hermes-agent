@@ -8,6 +8,8 @@ CONTAINER="${CONTAINER:-hermes}"
 PLATFORM="${AURORA_PLATFORM:-linux/amd64}"
 RECEIPT_ROOT="${AURORA_RECEIPT_ROOT:-/opt/data/aurora-image-rollback}"
 MODE="${AURORA_DEPLOY_MODE:-plan}"
+HOST_DATA_DIR="${AURORA_HOST_DATA_DIR:-}"
+ENV_FILE="${AURORA_ENV_FILE:-}"
 
 case "${1:-}" in
   ""|--plan) MODE=plan ;;
@@ -48,6 +50,34 @@ require_docker() {
   [[ "$(uname -m)" == "x86_64" ]] || { echo "INVALID: host is not linux/amd64" >&2; return 1; }
 }
 
+resolve_host_paths() {
+  local -a data_sources=()
+  if [[ -z "$HOST_DATA_DIR" ]]; then
+    mapfile -t data_sources < <(
+      docker inspect "$CONTAINER" | python3 -c '
+import json
+import sys
+
+objects = json.load(sys.stdin)
+if len(objects) != 1:
+    raise SystemExit(f"expected one container inspection, got {len(objects)}")
+for mount in objects[0].get("Mounts") or []:
+    if mount.get("Destination") == "/opt/data":
+        print(mount.get("Source") or "")
+'
+    )
+    ((${#data_sources[@]} == 1)) || {
+      echo "INVALID: expected exactly one host source mounted at /opt/data" >&2
+      return 1
+    }
+    HOST_DATA_DIR="${data_sources[0]}"
+  fi
+  [[ -d "$HOST_DATA_DIR" ]] || { echo "INVALID: host data directory missing" >&2; return 1; }
+  ENV_FILE="${ENV_FILE:-$HOST_DATA_DIR/.env}"
+  [[ -r "$ENV_FILE" ]] || { echo "INVALID: approved env-file missing" >&2; return 1; }
+  echo "HOST PATHS PASS data=$HOST_DATA_DIR env=<approved>"
+}
+
 capture_runtime_argv() {
   local argv_file
   docker inspect "$CONTAINER" >/dev/null
@@ -59,7 +89,7 @@ capture_runtime_argv() {
   ((${#RUNTIME_ARGS[@]} > 0)) || { echo "INVALID: no runtime argv generated" >&2; return 1; }
   local has_data_bind=0 arg
   for arg in "${RUNTIME_ARGS[@]}"; do
-    [[ "$arg" == /opt/data:/opt/data* ]] && has_data_bind=1
+    [[ "$arg" == *:/opt/data || "$arg" == *:/opt/data:* ]] && has_data_bind=1
   done
   ((has_data_bind == 1)) || { echo "INVALID: /opt/data bind absent" >&2; return 1; }
   printf 'RUNTIME ARGV PASS count=%d sample=' "${#RUNTIME_ARGS[@]}"
@@ -92,7 +122,7 @@ case "$MODE" in
 
   prepare)
     require_docker
-    [[ -r /opt/data/.env ]] || { echo "INVALID: approved env-file missing" >&2; exit 1; }
+    resolve_host_paths
     capture_runtime_argv
     mkdir -p "$RECEIPT_DIR"
     make_context
@@ -109,7 +139,7 @@ case "$MODE" in
 
     docker run --rm --platform "$PLATFORM" \
       --entrypoint /opt/aurora/startup-check.sh "$IMAGE"
-    docker run --rm --platform "$PLATFORM" -v /opt/data:/opt/data \
+    docker run --rm --platform "$PLATFORM" -v "$HOST_DATA_DIR:/opt/data:rw" \
       --entrypoint /opt/hermes/.venv/bin/python3 "$IMAGE" -c \
       "from faster_whisper import WhisperModel; import glob,os; m=WhisperModel('small', device='cpu', compute_type='int8'); fs=glob.glob('/opt/data/cache/audio/*.ogg'); assert fs, 'no cached audio'; f=max(fs,key=os.path.getmtime); segs,_=m.transcribe(f); text=' '.join(s.text for s in segs).strip(); assert text, 'empty transcription'; print('STT OK chars', len(text))"
 
@@ -125,7 +155,7 @@ case "$MODE" in
       exit 1
     }
     require_docker
-    [[ -r /opt/data/.env ]] || { echo "INVALID: approved env-file missing" >&2; exit 1; }
+    resolve_host_paths
     [[ -r "$RECEIPT_DIR/authority-sha.txt" && -r "$RECEIPT_DIR/image-id.txt" ]] || {
       echo "INVALID: exact prepare receipts missing" >&2
       exit 1
@@ -162,7 +192,7 @@ case "$MODE" in
     docker rename "$CONTAINER" "$ROLLBACK_CONTAINER"
     rollback_ready=1
     docker run -d --name "$CONTAINER" --platform "$PLATFORM" \
-      "${RUNTIME_ARGS[@]}" --env-file /opt/data/.env "$IMAGE"
+      "${RUNTIME_ARGS[@]}" --env-file "$ENV_FILE" "$IMAGE"
 
     health=starting
     for _ in {1..24}; do

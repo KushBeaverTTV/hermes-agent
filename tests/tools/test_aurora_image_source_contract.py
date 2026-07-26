@@ -57,6 +57,19 @@ def test_deploy_runbook_defaults_to_plan_and_guards_live_mutation():
     assert "PLAN PASS: no build, stop, rename, run, restart, or cutover performed" in source
 
 
+def test_deploy_runbook_derives_host_data_mount_instead_of_assuming_host_opt_data():
+    source = RUNBOOK.read_text(encoding="utf-8")
+
+    assert 'HOST_DATA_DIR="${AURORA_HOST_DATA_DIR:-}"' in source
+    assert 'ENV_FILE="${AURORA_ENV_FILE:-}"' in source
+    assert "resolve_host_paths" in source
+    assert 'mount.get("Destination") == "/opt/data"' in source
+    assert 'ENV_FILE="${ENV_FILE:-$HOST_DATA_DIR/.env}"' in source
+    assert '-v "$HOST_DATA_DIR:/opt/data:rw"' in source
+    assert '--env-file "$ENV_FILE"' in source
+    assert '[[ -r /opt/data/.env ]]' not in source
+
+
 def test_startup_check_resolves_custom_aurora_source_and_locked_stt():
     source = STARTUP.read_text(encoding="utf-8")
     assert "EXPECTED_GATEWAY_SOURCE=/opt/hermes/gateway/run.py" in source
