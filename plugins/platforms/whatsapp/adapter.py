@@ -88,7 +88,7 @@ def _listener_pids_on_port(port: int, *, proc_root: Path = Path("/proc")) -> lis
     port_hex = f"{port:04X}"
     for table in (proc_root / "net/tcp", proc_root / "net/tcp6"):
         try:
-            for line in table.read_text().splitlines()[1:]:
+            for line in table.read_text(encoding="utf-8").splitlines()[1:]:
                 fields = line.split()
                 if (
                     len(fields) > 9
