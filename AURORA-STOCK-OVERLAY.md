@@ -44,10 +44,10 @@ The previous custom Docker/release campaign is also not part of this source over
 
 Before activation or merge:
 
-1. Project integrity validator reports PASS.
-2. Focused owner/subagent contracts are green in both reachable busy-message paths.
-3. Adjacent authorization, busy, and interrupt tests are green.
-4. Broad `tests/agent tests/gateway` is compared against an immutable stock worktree on the identical selection. A red stock baseline remains red; only a verified zero-new-red delta may be described as no regression.
+1. Project integrity validator reports PASS using `/opt/data/skills/software-development/agent-layers-closeout/scripts/validate_project_integrity.py --manifest PROJECT-MAP.json`.
+2. The complete focused command `python -m pytest tests/gateway/test_subagent_protection_30170.py tests/gateway/test_priority_path_compression_demotion_56391.py` is green. Auditable contracts include `test_exact_allowlist_owner_supersedes_steer_and_subagent_demotion`, `test_secondary_profile_never_inherits_default_owner_ids`, `test_exact_owner_priority_path_bypasses_subagent_and_compression_demotion`, both drain tests, startup-sentinel coverage, media exclusion, pairing isolation, alternate-ID rejection, and the direct `_handle_message` PRIORITY tests.
+3. Adjacent authorization, busy, and interrupt tests are green on an existence-validated argv selection; the authoritative command and output are retained under the external receipt root declared in `PROJECT-MAP.json`.
+4. Broad `tests/agent tests/gateway` is compared against immutable stock base `78c06525e8e955e06a007b07b347c679f3977c3e` on the identical selection. A red stock baseline remains red; only a verified zero-new-red delta may be described as no regression.
 5. Independent read-only review findings are corrected or explicitly blocked with evidence.
 6. Live gateway is not restarted or reconfigured as a side effect of source testing.
 

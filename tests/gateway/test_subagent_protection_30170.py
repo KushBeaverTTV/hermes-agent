@@ -400,16 +400,22 @@ class TestBusyHandlerDemotesInterruptForSubagents:
             else default,
         )
         runner = _make_runner()
+        del runner.__dict__["_is_user_authorized"]
         runner._busy_input_mode = "interrupt"
         adapter = _make_adapter()
+        adapter.config = PlatformConfig(enabled=True, extra={})
         event = _make_event(text="guest follow-up")
-        event.source.platform = MagicMock(value="discord")
+        event.source.platform = Platform.DISCORD
         event.source.user_id = "guest"
         event.source.user_name = "Kush Beaver"
         sk = build_session_key(event.source)
         parent = _make_parent_with_subagents()
         runner._running_agents[sk] = parent
-        runner.adapters[event.source.platform] = adapter
+        runner.config.platforms[Platform.DISCORD] = adapter.config
+        runner.adapters[Platform.DISCORD] = adapter
+
+        assert runner._is_user_authorized(event.source) is True
+        assert runner._is_explicit_owner_source(event.source) is False
 
         handled = await runner._handle_active_session_busy_message(event, sk)
 
@@ -444,6 +450,25 @@ class TestBusyHandlerDemotesInterruptForSubagents:
 
 
 class TestExplicitOwnerSource:
+    def test_secondary_profile_never_inherits_default_owner_ids(self) -> None:
+        runner = _make_runner()
+        _set_owner_ids(runner, "default-owner")
+        secondary = _make_adapter()
+        secondary.config = PlatformConfig(enabled=True, extra={})
+        runner._profile_adapters = {
+            "secondary": {Platform.TELEGRAM: secondary}
+        }
+        source = _make_event().source
+        source.platform = Platform.TELEGRAM
+        source.profile = "secondary"
+        source.user_id = "default-owner"
+
+        assert runner._is_explicit_owner_source(source) is False
+
+        secondary.config.extra["owner_user_ids"] = ["secondary-owner"]
+        source.user_id = "secondary-owner"
+        assert runner._is_explicit_owner_source(source) is True
+
     def test_real_yaml_path_bridges_owner_ids_into_platform_extra(
         self, monkeypatch, tmp_path
     ) -> None:

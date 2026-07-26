@@ -371,20 +371,22 @@ class GatewayAuthorizationMixin:
             )
         except (TypeError, ValueError):
             return False
-
-        # Prefer the profile-specific live adapter in multiplex mode.  The
-        # runner config remains the canonical fallback for the default profile
-        # and for tests that do not construct a full adapter registry.
+        # Resolve owner authority from the transport-owning profile. A stamped
+        # secondary profile is an authorization boundary and must never inherit
+        # the default runner/platform owner list.
         raw_owner_ids = None
-        adapter = self._authorization_adapter(
-            raw_platform,
-            getattr(source, "profile", None),
-        )
+        transport_profile = self._adapter_profile_for_source(source)
+        profile_name = (transport_profile or "").strip() or None
+        is_secondary_profile = bool(profile_name and profile_name != "default")
+        adapter = self._authorization_adapter(raw_platform, transport_profile)
         adapter_extra = getattr(getattr(adapter, "config", None), "extra", None)
         if isinstance(adapter_extra, dict) and "owner_user_ids" in adapter_extra:
             raw_owner_ids = adapter_extra.get("owner_user_ids")
 
-        if raw_owner_ids is None:
+        if is_secondary_profile:
+            if raw_owner_ids is None:
+                return False
+        elif raw_owner_ids is None:
             config = getattr(self, "config", None)
             platforms = getattr(config, "platforms", None)
             platform_config = platforms.get(platform) if isinstance(platforms, dict) else None
