@@ -1,0 +1,32 @@
+{
+  "schema": "aurora-vendor-manifest-v1",
+  "artifacts": [
+    {
+      "path": "vendor/mnemosyne/mnemosyne_memory-3.14.2-py3-none-any.whl",
+      "sha256": "6217aafb85796e783610a234d8a3762bf46835e7f64c0910703949d7ace6ce7e",
+      "size": 634641,
+      "kind": "python-wheel",
+      "name": "mnemosyne-memory",
+      "version": "3.14.2",
+      "purpose": "Aurora canonical memory runtime"
+    },
+    {
+      "path": "vendor/mnemosyne/mnemosyne_hermes-0.5.2-py3-none-any.whl",
+      "sha256": "af028d0dc8b2a4f52c17f9767099881b00a58366805908c00855e360f0bf1a2a",
+      "size": 81688,
+      "kind": "python-wheel",
+      "name": "mnemosyne-hermes",
+      "version": "0.5.2",
+      "purpose": "Aurora memory integration for the agent engine"
+    },
+    {
+      "path": "vendor/sqlite/sqlite-autoconf-3510300.tar.gz",
+      "sha256": "81f5be397049b0cae1b167f2225af7646fc0f82e4a9b3c48c9ea3a533e21d77a",
+      "size": 3208867,
+      "kind": "source-archive",
+      "name": "sqlite-autoconf",
+      "version": "3510300",
+      "purpose": "SQLite session-extension build source"
+    }
+  ]
+}
