@@ -243,6 +243,52 @@ async def test_exact_owner_priority_path_preempts_existing_fifo_head(monkeypatch
 
 
 @pytest.mark.asyncio
+async def test_exact_owner_priority_falls_back_to_queue_when_preemption_rejects():
+    runner, agent_mock, sk = _make_runner(compression_in_flight=False)
+    _set_owner_ids(runner, "u1")
+    runner._preempt_busy_queue_with_owner_event = MagicMock(return_value=False)
+    event = _make_event("owner must survive")
+
+    await runner._handle_message(event)
+
+    assert runner.adapters[Platform.TELEGRAM]._pending_messages[sk] is event
+    agent_mock.interrupt.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_exact_owner_startup_sentinel_falls_back_when_preemption_rejects():
+    from gateway.run import _AGENT_PENDING_SENTINEL
+
+    runner, agent_mock, sk = _make_runner(compression_in_flight=False)
+    _set_owner_ids(runner, "u1")
+    runner._running_agents[sk] = _AGENT_PENDING_SENTINEL
+    runner._preempt_busy_queue_with_owner_event = MagicMock(return_value=False)
+    event = _make_event("owner survives startup")
+
+    await runner._handle_message(event)
+
+    assert runner.adapters[Platform.TELEGRAM]._pending_messages[sk] is event
+    agent_mock.interrupt.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_exact_owner_direct_drain_falls_back_when_preemption_rejects():
+    runner, agent_mock, sk = _make_runner(compression_in_flight=False)
+    _set_owner_ids(runner, "u1")
+    runner._draining = True
+    runner._queue_during_drain_enabled = lambda: True
+    runner._status_action_gerund = lambda: "restarting"
+    runner._preempt_busy_queue_with_owner_event = MagicMock(return_value=False)
+    event = _make_event("owner survives drain")
+
+    reply = await runner._handle_message(event)
+
+    assert isinstance(reply, str) and "queued" in reply
+    assert runner.adapters[Platform.TELEGRAM]._pending_messages[sk] is event
+    agent_mock.interrupt.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_exact_owner_preempts_full_media_queue_while_agent_is_starting(
     monkeypatch,
 ):
