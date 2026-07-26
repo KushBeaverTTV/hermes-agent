@@ -108,6 +108,15 @@ def test_owner_authority_prompt_is_hidden_from_messaging_guest(monkeypatch):
     assert called == []
 
 
+def test_prompt_omits_authority_context_when_store_read_fails(monkeypatch):
+    def broken_load(*, limit=30):
+        raise RuntimeError("authority store unavailable")
+
+    monkeypatch.setattr("mnemosyne.authority.load_directives", broken_load)
+
+    assert capture.build_owner_authority_prompt(_agent()) == ""
+
+
 def test_allowlisted_or_paired_non_owner_cannot_record_or_receive_authority(monkeypatch):
     called = []
     monkeypatch.setattr(capture, "record_owner_directive", lambda *a, **k: called.append(True))

@@ -1679,7 +1679,14 @@ def is_zeroed_state_db(
         return False
     if size <= 0:
         return False
-    from hermes_cli.sqlite_safe_read import read_header_bytes_preopen
+    try:
+        from hermes_cli.sqlite_safe_read import read_header_bytes_preopen
+    except ImportError:
+        logger.debug(
+            "hermes_cli.sqlite_safe_read unavailable; skipping zeroed-file byte probe for %s",
+            path,
+        )
+        return False
 
     head = read_header_bytes_preopen(
         path, length=max(16, probe_bytes), force=force
@@ -1984,6 +1991,16 @@ class SessionDB:
             # cause that another thread's /resume is about to format.
             # Tests that need to reset the state can call
             # ``hermes_state._set_last_init_error(None)`` explicitly.
+            # Ensure every failed initialization releases its tracked SQLite
+            # connection before the exception escapes. Leaving it registered
+            # would make future safe header probes fail closed forever.
+            conn = self._conn
+            self._conn = None
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    logger.exception("Failed to close state.db after initialization error")
             _set_last_init_error(f"{type(exc).__name__}: {exc}")
             raise
 

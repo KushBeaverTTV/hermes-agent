@@ -130,6 +130,37 @@ def test_explicit_backup_skip_still_allows_repair(tmp_path, monkeypatch):
     assert report["backup_path"] is None
 
 
+def test_is_zeroed_state_db_degrades_without_hermes_cli_modules(tmp_path, monkeypatch):
+    import builtins
+
+    db_path = tmp_path / "state.db"
+    db_path.write_bytes(b"not-a-sqlite-header" + b"x" * 128)
+    real_import = builtins.__import__
+
+    def blocked_hermes_cli(name, *args, **kwargs):
+        if name in {"hermes_cli.backup", "hermes_cli.sqlite_safe_read"}:
+            raise ImportError("constrained embed")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", blocked_hermes_cli)
+    assert hermes_state.is_zeroed_state_db(db_path) is False
+
+
+def test_failed_sessiondb_initialization_closes_tracked_connection(tmp_path, monkeypatch):
+    from hermes_cli.sqlite_safe_read import has_live_connection
+
+    db_path = tmp_path / "state.db"
+
+    def fail_schema(_self):
+        raise RuntimeError("schema initialization failed")
+
+    monkeypatch.setattr(hermes_state.SessionDB, "_init_schema", fail_schema)
+    with pytest.raises(RuntimeError, match="schema initialization failed"):
+        hermes_state.SessionDB(db_path=db_path)
+
+    assert not has_live_connection(db_path)
+
+
 def test_repaired_db_search_works(tmp_path):
     db_path = tmp_path / "state.db"
     _build_healthy_db(db_path)

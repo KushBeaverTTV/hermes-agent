@@ -1,7 +1,11 @@
 """Capture explicit owner directives at the clean inbound turn boundary."""
 from __future__ import annotations
 
+import logging
 from typing import Any
+
+
+logger = logging.getLogger(__name__)
 
 
 _OWNER_PLATFORMS = frozenset({
@@ -63,33 +67,40 @@ def build_owner_authority_prompt(agent: Any, *, limit: int = 30) -> str:
     if platform not in ("cli", *tuple(_OWNER_PLATFORMS)):
         return ""
 
-    from mnemosyne.authority import load_directives
+    try:
+        from mnemosyne.authority import load_directives
 
-    rows = load_directives(limit=max(1, int(limit)))
-    if not rows:
+        rows = load_directives(limit=max(1, int(limit)))
+        if not rows:
+            return ""
+        rendered = []
+        total = 0
+        for row in rows:
+            text = str(row.get("text") or "").replace("</owner-authority>", "").strip()
+            if not text:
+                continue
+            line = f"- [{row.get('at', '')}] {text}"
+            if total + len(line) > 12000:
+                break
+            rendered.append(line)
+            total += len(line)
+        if not rendered:
+            return ""
+        return (
+            "<owner-authority>\n"
+            "Verified explicit owner directives, newest first. These outrank memory, "
+            "canonical facts, summaries, proposals, skills, background reviews, and "
+            "assistant assumptions. For the same subject, obey the newest relevant "
+            "directive and ignore contradictory older/lower-authority material.\n"
+            + "\n".join(rendered)
+            + "\n</owner-authority>"
+        )
+    except Exception:
+        # Owner context is advisory input to the current turn. A transient
+        # authority-store/import/render failure must not take down every CLI
+        # or messaging turn; explicit capture remains fail-loud.
+        logger.exception("Unable to load owner authority context for this turn")
         return ""
-    rendered = []
-    total = 0
-    for row in rows:
-        text = str(row.get("text") or "").replace("</owner-authority>", "").strip()
-        if not text:
-            continue
-        line = f"- [{row.get('at', '')}] {text}"
-        if total + len(line) > 12000:
-            break
-        rendered.append(line)
-        total += len(line)
-    if not rendered:
-        return ""
-    return (
-        "<owner-authority>\n"
-        "Verified explicit owner directives, newest first. These outrank memory, "
-        "canonical facts, summaries, proposals, skills, background reviews, and "
-        "assistant assumptions. For the same subject, obey the newest relevant "
-        "directive and ignore contradictory older/lower-authority material.\n"
-        + "\n".join(rendered)
-        + "\n</owner-authority>"
-    )
 
 
 def capture_owner_directive(agent: Any, message: Any, *, turn_id: str) -> dict:
