@@ -1277,6 +1277,27 @@ def _apply_pulled_update(
         node_failures=node_failures, update_complete=update_complete)
 
 
+def _resume_windows_gateways_in_finally(_windows_gateway_resume) -> None:
+    """Last-resort Windows gateway resume for ``_cmd_update_impl``'s ``finally``.
+
+    The per-path resumes (and the ``atexit`` backstop) miss one real topology: the Windows
+    shim hand-off child exits through ``os._exit`` in ``cmd_update``'s own ``finally``, which
+    runs NO ``atexit`` handlers — so a mid-update ``sys.exit`` there (fetch failure, shim
+    quarantine refusal, install error) would strand every paused gateway until the watchdog
+    or a manual restart. Resume is idempotent (``resume_needed`` flips off), so a completed
+    resume is a no-op and a partially failed one retries only what remains. Never masks an
+    in-flight exception: a resume failure here is warned about, not raised.
+    """
+    if not _windows_gateway_resume:
+        return
+    try:
+        _m()._resume_windows_gateways_after_update(_windows_gateway_resume)
+    except Exception as exc:
+        logger.warning("Windows gateway resume in update finally failed: %s", exc)
+        print(f"  ⚠ Could not restore paused Windows gateway(s): {exc}")
+        print("    Recover with: hermes gateway restart")
+
+
 def _cmd_update_impl(args, gateway_mode: bool):
     """Body of ``cmd_update`` — kept separate so the wrapper can always restore stdio even on
     ``sys.exit``. Self-lock deferral deliberately does NOT run here (pre-fetch it stranded users
@@ -1301,110 +1322,116 @@ def _cmd_update_impl(args, gateway_mode: bool):
         import atexit as _atexit
         _atexit.register(_m()._resume_windows_gateways_after_update, _windows_gateway_resume)
 
-    # Any venv python still running (typically the Desktop `hermes serve` backend) keeps .pyd
-    # locked and would corrupt the sync; refuse rather than race (the app respawns a killed
-    # backend). NOT bypassed by --force (desktop updater, shim guard only); --force-venv is.
-    if _m()._is_windows() and not getattr(args, "force_venv", False):
-        _clear_windows_venv_holders_or_exit(args, gateway_mode, _windows_gateway_resume)
-
-    # After every fail-closed venv guard, before either path can remove the release tree.
-    # Self-lock deferral moved: the venv-holder sweep above excludes this process by design (a CLI `hermes
-    # update` IS the venv python), and an updater that has imported a native venv extension cannot rewrite
-    # its own mapped .pyd (#83569). That check used to run HERE — before the fetch — but firing pre-fetch
-    # meant a deferral stranded the user on the OLD checkout, and any startup path that eagerly loaded
-    # cryptography turned every Windows update into an exit-2 loop (#86735/#86780/#86781). It now runs via
-    # _abort_dependency_sync_if_self_locked() after the code swap, immediately before the dependency sync —
-    # the only phase the lock can actually break — and only when the sync would truly rewrite the loaded
-    # distribution.
-    desktop_dir = _m().PROJECT_ROOT / "apps" / "desktop"
-    had_desktop_app_before_update = _desktop_app_present(desktop_dir)
-
-    use_zip_update, git_cmd, is_fork = _prepare_git_command()
-
-    if use_zip_update:
-        try:
-            desktop_build_ok = _update_via_zip(
-                args, had_desktop_app_before_update=had_desktop_app_before_update)
-        finally:
-            _m()._resume_windows_gateways_after_update(_windows_gateway_resume)
-        if gateway_mode:
-            _write_gateway_update_exit_code(desktop_build_ok)
-        return
-
+    # Resume runs from a finally (not only the per-path calls / atexit backstop): the Windows
+    # shim hand-off child exits via ``os._exit`` in ``cmd_update``'s finally, which skips every
+    # atexit handler — a mid-update sys.exit there would otherwise strand the paused fleet.
     try:
-        # Scoped fetch: a bare `git fetch origin` pulls thousands of branches and can stall.
-        branch = _m()._resolve_update_branch(args)
+        # Any venv python still running (typically the Desktop `hermes serve` backend) keeps .pyd
+        # locked and would corrupt the sync; refuse rather than race (the app respawns a killed
+        # backend). NOT bypassed by --force (desktop updater, shim guard only); --force-venv is.
+        if _m()._is_windows() and not getattr(args, "force_venv", False):
+            _clear_windows_venv_holders_or_exit(args, gateway_mode, _windows_gateway_resume)
 
-        # Self-heal abandoned .git/*.lock files (crashed fetch) or the fetch fails "File exists".
-        from hermes_cli.gitlock import clear_stale_git_locks, clear_stale_tmp_packs
-        cleared = clear_stale_git_locks(_m().PROJECT_ROOT)
-        if cleared:
-            print("  (removed stale git lock(s): %s)" % ", ".join(cleared))
-        swept = clear_stale_tmp_packs(_m().PROJECT_ROOT)
-        if swept:
-            print("  (removed %d aborted-fetch pack temp file(s))" % len(swept))
-        # Shallow installer checkouts collect one `.git/shallow` graft per past depth-1 fetch
-        # (#105951); stale grafts break merge-base and push this run into the divergence path.
-        from hermes_cli.gitlock import repair_broken_shallow_boundaries, prune_stale_shallow_grafts
-        repaired = repair_broken_shallow_boundaries(_m().PROJECT_ROOT)
-        if repaired:
-            print(f"  (restored {repaired} broken shallow boundary(ies))")
-        pruned = prune_stale_shallow_grafts(_m().PROJECT_ROOT)
-        if pruned:
-            print(f"  (pruned {pruned} stale shallow graft(s) left by past depth-1 checks)")
+        # After every fail-closed venv guard, before either path can remove the release tree.
+        # Self-lock deferral moved: the venv-holder sweep above excludes this process by design (a CLI `hermes
+        # update` IS the venv python), and an updater that has imported a native venv extension cannot rewrite
+        # its own mapped .pyd (#83569). That check used to run HERE — before the fetch — but firing pre-fetch
+        # meant a deferral stranded the user on the OLD checkout, and any startup path that eagerly loaded
+        # cryptography turned every Windows update into an exit-2 loop (#86735/#86780/#86781). It now runs via
+        # _abort_dependency_sync_if_self_locked() after the code swap, immediately before the dependency sync —
+        # the only phase the lock can actually break — and only when the sync would truly rewrite the loaded
+        # distribution.
+        desktop_dir = _m().PROJECT_ROOT / "apps" / "desktop"
+        had_desktop_app_before_update = _desktop_app_present(desktop_dir)
 
-        # Surface autostashes left by earlier updates (--keep-stash, failed restores).
-        # Surface autostash entries left behind by earlier updates (#63717 problem 6) — parked --keep-stash
-        # runs and failed restores preserve the stash but nothing ever mentioned it again.
-        _m()._warn_orphaned_update_autostashes(git_cmd, _m().PROJECT_ROOT)
+        use_zip_update, git_cmd, is_fork = _prepare_git_command()
 
-        print("→ Fetching updates...")
-        fetch_result = _git_run(git_cmd, ["fetch", "origin", branch], network=True)
-        if fetch_result.returncode != 0:
-            _print_fetch_failure(fetch_result.stderr)
-            sys.exit(1)
-
-        current_branch = _current_branch_name(git_cmd, check=True)
-        _plan = _prepare_checkout_for_update(
-            git_cmd, branch, current_branch, is_fork=is_fork, assume_yes=assume_yes,
-            gateway_mode=gateway_mode, gw_input_fn=gw_input_fn, switch_branch=opts.switch_branch,
-            _windows_gateway_resume=_windows_gateway_resume)
-        commit_count = _plan.commit_count
-
-        if commit_count == 0:
-            _finish_already_up_to_date(
-                git_cmd, branch, current_branch, _plan, assume_yes=assume_yes,
-                gateway_mode=gateway_mode, gw_input_fn=gw_input_fn,
-                pre_update_snapshot_id=pre_update_snapshot_id,
-                had_desktop_app_before_update=had_desktop_app_before_update,
-                active_lazy_features=opts.active_lazy_features,
-                active_tool_dependencies=opts.active_tool_dependencies,
-                _windows_gateway_resume=_windows_gateway_resume)
+        if use_zip_update:
+            try:
+                desktop_build_ok = _update_via_zip(
+                    args, had_desktop_app_before_update=had_desktop_app_before_update)
+            finally:
+                _m()._resume_windows_gateways_after_update(_windows_gateway_resume)
+            if gateway_mode:
+                _write_gateway_update_exit_code(desktop_build_ok)
             return
 
-        if commit_count > 0:
-            print(f"→ Found {commit_count} new commit(s)")
-        else:
-            # Shallow, exact count unrecoverable — but the tips differ, so there IS an update.
-            print("→ Updates available (commit count unknown on this shallow checkout)")
+        try:
+            # Scoped fetch: a bare `git fetch origin` pulls thousands of branches and can stall.
+            branch = _m()._resolve_update_branch(args)
 
-        print("→ Pulling updates...")
-        pre_pull_sha = _pull_updates(
-            git_cmd, branch, _plan.auto_stash_ref, prompt_for_restore=_plan.prompt_for_restore,
-            gw_input_fn=gw_input_fn, discard_local_changes=opts.discard_local_changes,
-            keep_stash=opts.keep_stash)
-        _apply_pulled_update(
-            git_cmd, branch, pre_pull_sha, _plan, opts, gateway_mode=gateway_mode,
-            is_fork=is_fork, desktop_dir=desktop_dir,
-            had_desktop_app_before_update=had_desktop_app_before_update,
-            pre_update_snapshot_id=pre_update_snapshot_id, _pre_update_plan=_pre_update_plan,
-            _windows_gateway_resume=_windows_gateway_resume)
-    except _shim_quarantine_error_type() as e:
-        # Strict quarantine refused BEFORE any installer ran — defer via marker, exit 2, no ZIP.
-        # See #87331.
-        _refuse_update_for_contended_shims(e)
-    except subprocess.CalledProcessError as e:
-        _handle_update_called_process_error(e, args, gateway_mode, had_desktop_app_before_update)
+            # Self-heal abandoned .git/*.lock files (crashed fetch) or the fetch fails "File exists".
+            from hermes_cli.gitlock import clear_stale_git_locks, clear_stale_tmp_packs
+            cleared = clear_stale_git_locks(_m().PROJECT_ROOT)
+            if cleared:
+                print("  (removed stale git lock(s): %s)" % ", ".join(cleared))
+            swept = clear_stale_tmp_packs(_m().PROJECT_ROOT)
+            if swept:
+                print("  (removed %d aborted-fetch pack temp file(s))" % len(swept))
+            # Shallow installer checkouts collect one `.git/shallow` graft per past depth-1 fetch
+            # (#105951); stale grafts break merge-base and push this run into the divergence path.
+            from hermes_cli.gitlock import repair_broken_shallow_boundaries, prune_stale_shallow_grafts
+            repaired = repair_broken_shallow_boundaries(_m().PROJECT_ROOT)
+            if repaired:
+                print(f"  (restored {repaired} broken shallow boundary(ies))")
+            pruned = prune_stale_shallow_grafts(_m().PROJECT_ROOT)
+            if pruned:
+                print(f"  (pruned {pruned} stale shallow graft(s) left by past depth-1 checks)")
+
+            # Surface autostashes left by earlier updates (--keep-stash, failed restores).
+            # Surface autostash entries left behind by earlier updates (#63717 problem 6) — parked --keep-stash
+            # runs and failed restores preserve the stash but nothing ever mentioned it again.
+            _m()._warn_orphaned_update_autostashes(git_cmd, _m().PROJECT_ROOT)
+
+            print("→ Fetching updates...")
+            fetch_result = _git_run(git_cmd, ["fetch", "origin", branch], network=True)
+            if fetch_result.returncode != 0:
+                _print_fetch_failure(fetch_result.stderr)
+                sys.exit(1)
+
+            current_branch = _current_branch_name(git_cmd, check=True)
+            _plan = _prepare_checkout_for_update(
+                git_cmd, branch, current_branch, is_fork=is_fork, assume_yes=assume_yes,
+                gateway_mode=gateway_mode, gw_input_fn=gw_input_fn, switch_branch=opts.switch_branch,
+                _windows_gateway_resume=_windows_gateway_resume)
+            commit_count = _plan.commit_count
+
+            if commit_count == 0:
+                _finish_already_up_to_date(
+                    git_cmd, branch, current_branch, _plan, assume_yes=assume_yes,
+                    gateway_mode=gateway_mode, gw_input_fn=gw_input_fn,
+                    pre_update_snapshot_id=pre_update_snapshot_id,
+                    had_desktop_app_before_update=had_desktop_app_before_update,
+                    active_lazy_features=opts.active_lazy_features,
+                    active_tool_dependencies=opts.active_tool_dependencies,
+                    _windows_gateway_resume=_windows_gateway_resume)
+                return
+
+            if commit_count > 0:
+                print(f"→ Found {commit_count} new commit(s)")
+            else:
+                # Shallow, exact count unrecoverable — but the tips differ, so there IS an update.
+                print("→ Updates available (commit count unknown on this shallow checkout)")
+
+            print("→ Pulling updates...")
+            pre_pull_sha = _pull_updates(
+                git_cmd, branch, _plan.auto_stash_ref, prompt_for_restore=_plan.prompt_for_restore,
+                gw_input_fn=gw_input_fn, discard_local_changes=opts.discard_local_changes,
+                keep_stash=opts.keep_stash)
+            _apply_pulled_update(
+                git_cmd, branch, pre_pull_sha, _plan, opts, gateway_mode=gateway_mode,
+                is_fork=is_fork, desktop_dir=desktop_dir,
+                had_desktop_app_before_update=had_desktop_app_before_update,
+                pre_update_snapshot_id=pre_update_snapshot_id, _pre_update_plan=_pre_update_plan,
+                _windows_gateway_resume=_windows_gateway_resume)
+        except _shim_quarantine_error_type() as e:
+            # Strict quarantine refused BEFORE any installer ran — defer via marker, exit 2, no ZIP.
+            # See #87331.
+            _refuse_update_for_contended_shims(e)
+        except subprocess.CalledProcessError as e:
+            _handle_update_called_process_error(e, args, gateway_mode, had_desktop_app_before_update)
+    finally:
+        _resume_windows_gateways_in_finally(_windows_gateway_resume)
 
 
 # ---- BEGIN PLUGIN-COMPAT (revert-scheduled; see COMPAT_MANIFEST.md) ----
