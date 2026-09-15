@@ -367,6 +367,7 @@ def _build_children(
     task_list: List[Dict[str, Any]], task_schemas: List[Optional[Dict[str, Any]]], creds: Dict[str, Any], *,
     top_role: str, max_iterations: int, parent_agent, routing_cfg: Dict[str, Any],
     live_deleg_id: Optional[str], live_writers: list, task_images: Optional[List[Optional[List[str]]]] = None,
+    clean_context: bool = False,
 ) -> tuple[List[tuple], Optional[str]]:
     """Build every child on the main thread (construction is not thread-safe);
     ``(children, None)`` or ``([], error)`` on an explicit-pin preflight failure."""
@@ -403,11 +404,12 @@ def _build_children(
             _merged = dict(overrides)
             _merged.update(_task_overrides)
             # Per-task clean_context takes precedence over the call-level flag.
-            _task_clean = _task_overrides.get("clean_context", clean_context)
+            # Pull clean_context out of _merged so we can pass it as a top-level kwarg
+            # (avoids the duplicate-kwarg conflict with the spread).
+            _task_clean = _merged.pop("clean_context", clean_context)
             child = _build_child_preserving_parent_tools(
                 task_index=i, goal=t["goal"], context=_child_context,
                 toolsets=None,  # always inherit the parent's toolsets (clean_context overrides inside _resolve_child_toolsets)
-                model=_task_overrides.get("model", creds["model"]),
                 max_iterations=max_iterations, task_count=len(task_list),
                 parent_agent=parent_agent, role=_normalize_role(t.get("role") or top_role),
                 clean_context=_task_clean, **_merged,
