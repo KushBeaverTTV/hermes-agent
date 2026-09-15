@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import logging
+import re
 from typing import Any, Dict, Optional
 
 from agent.message_metadata import append_message
@@ -22,6 +23,54 @@ _EPHEMERAL_SCAFFOLDING_FLAGS = (
     "_thinking_prefill", "_empty_recovery_synthetic", "_empty_terminal_sentinel",
     "_dropped_toolcall_nudge",
 )
+
+
+_ANNOUNCES_PENDING_ACTION_RE = re.compile(
+    r"\b(?:let me|let's|let us|i(?:'|\u2019)?ll|i will|i am going to|i'm going to"
+    r"|next,? i|i need to|i can)\b",
+    re.IGNORECASE,
+)
+
+
+def reasoning_announces_pending_action(text: Any, tail_chars: int = 200) -> bool:
+    """True when reasoning announces work the model has not actually done.
+
+    Planning monologue ("Let me batch the calls and run them in parallel.") is not an
+    answer — it is an intention. Promoting it produces a reply that reads like the
+    assistant is about to act and then the turn ends.
+
+    Only the TAIL is inspected: an answer may legitimately mention "let me" mid-text
+    while still concluding with the actual result.
+    """
+    t = (text or "").strip()
+    if not t:
+        return False
+    return bool(_ANNOUNCES_PENDING_ACTION_RE.search(t[-tail_chars:]))
+
+
+def reasoning_only_is_stall(agent: Any, api_call_count: Any, reasoning: Any) -> bool:
+    """True when a reasoning-only, tool-less clean stop is a **stall**, not an answer.
+
+    ``agent/turn_final_response.py`` promotes reasoning to the visible answer when the
+    model returns ``finish_reason == "stop"`` with empty content and no tool calls.
+    That promotion exists for parsers that file the answer as reasoning (vLLM
+    nemotron_v3 past ~500K prompt tokens), which is always deep into a turn, and it is
+    the documented contract for a clean-stop reasoning answer
+    (``test_reasoning_only_local_clean_stop_returns_immediately``).
+
+    It is wrong when the model was handed tools, has not executed any yet, and emitted
+    planning monologue: promoting it invents a plausible-looking "I'm about to do it"
+    reply and ends the turn as a clean success, hiding a model that never acts
+    (#111761). On glm-5-3-flash-high over ACP every turn did exactly this — 4/4 turns,
+    session ``tool_call_count=0``, no error surfaced.
+
+    Stall requires ALL of: tools were in the schema, no tool round has run yet this
+    turn (``api_call_count`` increments once per loop iteration, so ``<= 1`` means the
+    model has not acted), and the reasoning announces work rather than reporting it.
+    """
+    if not (bool(getattr(agent, "valid_tool_names", None)) and api_call_count <= 1):
+        return False
+    return reasoning_announces_pending_action(reasoning)
 
 
 @dataclass
@@ -87,11 +136,33 @@ def finish_text_response(
     ):
         _promoted = agent._extract_reasoning(assistant_message)
         if _promoted:
-            logger.info(
-                "Reasoning-only clean stop (%d chars) — using reasoning as the final response",
-                len(_promoted),
-            )
-            assistant_message.content = _promoted
+            # A model that was offered tools, has not executed any yet this turn, and
+            # returns reasoning with no content and no tool call is not answering — it is
+            # stalling. Promoting its planning monologue here invented a plausible-looking
+            # "I'm about to do it" reply, ended the turn with status=complete, and hid a
+            # non-functioning model behind a clean success: on glm-5-3-flash-high over ACP
+            # every turn did this (4/4, zero tool calls, tool_call_count=0 for the
+            # session) and the surface reported no error (#111761).
+            #
+            # Leave the content empty instead so recover_empty_response() runs. The
+            # parser-compatibility case this block was written for (vLLM nemotron_v3 past
+            # ~500K prompt tokens, where the parser files the answer as reasoning) is
+            # always deep into a turn, so gating on the first iteration preserves it.
+            if reasoning_only_is_stall(agent, api_call_count, _promoted):
+                logger.warning(
+                    "Reasoning-only stall: no content, no tool calls, and no tool executed "
+                    "yet this turn — not promoting reasoning to the answer (%d chars, "
+                    "model=%s provider=%s); handing to empty-response recovery",
+                    len(_promoted),
+                    getattr(agent, "model", "?"),
+                    getattr(agent, "provider", "?"),
+                )
+            else:
+                logger.info(
+                    "Reasoning-only clean stop (%d chars) — using reasoning as the final response",
+                    len(_promoted),
+                )
+                assistant_message.content = _promoted
     final_response = assistant_message.content or ""
     # Unmute: _mute_post_response from a housekeeping tool turn must not silence
     # empty-response warnings on the final response path.
