@@ -31,7 +31,7 @@ from tools.delegate_tool_config import (  # noqa: F401
     _DEFAULT_MAX_CONCURRENT_CHILDREN, _get_child_timeout, _get_max_async_children, _get_max_concurrent_children,
     _get_max_spawn_depth, _get_orchestrator_enabled, _get_subagent_approval_callback, _get_worktree_isolation,
     _inherit_parent_capabilities, _load_config, _merge_request_overrides, _resolve_child_credential_pool,
-    _resolve_child_runtime, _resolve_delegation_credentials,
+    _resolve_child_runtime, _resolve_delegation_credentials, _resolve_fleet_template,
     _subagent_auto_approve, _subagent_auto_deny,
 )
 from tools.delegate_tool_dispatch import _Batch, _announce_batch, _capture_origin, _run_batch
@@ -47,7 +47,8 @@ from tools.delegate_tool_registry import (  # noqa: F401
     steer_subagent,
 )
 from tools.delegate_tool_tasks import (  # noqa: F401
-    _MAX_TASK_IMAGES, _coerce_task_images, _coerce_task_schemas, _normalize_task_images, _normalize_task_list,
+    _MAX_TASK_IMAGES, _coerce_task_images, _coerce_task_schemas, _extract_per_task_overrides,
+    _normalize_task_images, _normalize_task_list,
 )
 from tools.delegate_tool_toolsets import (  # noqa: F401
     DELEGATE_BLOCKED_TOOLS, _expand_parent_toolsets, _resolve_child_toolsets, _strip_blocked_tools,
@@ -216,12 +217,15 @@ def _build_child_agent(
         depth=max(0, child_depth - 1),  # 0 = first-level child for the UI
         model=model or getattr(parent_agent, "model", None), toolsets=child_toolsets, session_ref=child_session_ref,
     )
+    # Extract reasoning_effort from the merged per-task overrides (if any).
+    _per_task_reasoning = _task_overrides.get("reasoning_effort") if _task_overrides else None
     rt = _resolve_child_runtime(
         parent_agent, delegation_cfg, parent_api_key, model=model, override_provider=override_provider,
         override_base_url=override_base_url, override_api_key=override_api_key, override_api_mode=override_api_mode,
         override_acp_command=override_acp_command,
         override_acp_args=override_acp_args,
         routing_cfg=routing_cfg,
+        override_reasoning_effort=_per_task_reasoning,
     )
     if override_request_overrides is not None:
         # honored whenever set, incl. the inherit branch where
@@ -383,11 +387,30 @@ def _build_children(
         if _task_schema is not None:
             _child_context = append_output_contract(_child_context, _task_schema)
         try:
+            # Fleet template resolution: if the task names a template, fold it in
+            # BEFORE extracting per-task overrides so explicit task fields still win.
+            _template = t.get("template") if isinstance(t, dict) else None
+            if _template:
+                _tpl = _resolve_fleet_template(str(_template))
+                if _tpl is None:
+                    return [], f"Task {i}: unknown delegation.fleet template {str(_template)!r}"
+                _folded = dict(_tpl)
+                _folded.update({k: v for k, v in t.items() if k != "template" and k != "count"})
+                t = _folded  # local rebind for this iteration
+            # Per-task overrides (provider/model/base_url/api_mode/etc.) plus call-level overrides.
+            # Per-task wins; call-level fills the gaps. Built once per task.
+            _task_overrides = _extract_per_task_overrides(t)
+            _merged = dict(overrides)
+            _merged.update(_task_overrides)
+            # Per-task clean_context takes precedence over the call-level flag.
+            _task_clean = _task_overrides.get("clean_context", clean_context)
             child = _build_child_preserving_parent_tools(
                 task_index=i, goal=t["goal"], context=_child_context,
-                toolsets=None,  # always inherit the parent's toolsets
-                model=creds["model"], max_iterations=max_iterations, task_count=len(task_list),
-                parent_agent=parent_agent, role=_normalize_role(t.get("role") or top_role), **overrides,
+                toolsets=None,  # always inherit the parent's toolsets (clean_context overrides inside _resolve_child_toolsets)
+                model=_task_overrides.get("model", creds["model"]),
+                max_iterations=max_iterations, task_count=len(task_list),
+                parent_agent=parent_agent, role=_normalize_role(t.get("role") or top_role),
+                clean_context=_task_clean, **_merged,
             )
         except ValueError as exc:
             return [], str(exc)

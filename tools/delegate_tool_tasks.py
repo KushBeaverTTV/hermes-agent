@@ -1,6 +1,55 @@
-"""delegate_task input validation: tasks=[...] / legacy goal normalisation, per-task output schemas and images."""
-
 from __future__ import annotations
+
+def _extract_per_task_overrides(task: Dict[str, Any]) -> Dict[str, Any]:
+    """Per-task credential override kwargs for ``_resolve_child_runtime`` / ``_build_child_agent``.
+
+    Recognized keys (all optional, all forward-compatible):
+      provider           -> override_provider
+      model              -> model
+      base_url           -> override_base_url
+      api_key_env        -> override_api_key (resolved from env var name)
+      api_key            -> override_api_key (literal; only if api_key_env not set)
+      api_mode           -> override_api_mode
+      acp_command        -> override_acp_command
+      acp_args           -> override_acp_args
+      reasoning_effort   -> reasoning_effort kwarg passed through
+      clean_context      -> clean_context kwarg passed through
+      template           -> NOT resolved here; the caller resolves it before this function runs
+
+    Unknown keys are ignored (forward compat). Validation lives in _resolve_delegation_credentials.
+    """
+    out: Dict[str, Any] = {}
+    if not isinstance(task, dict):
+        return out
+    _MAP = {
+        "provider": "override_provider",
+        "model": "model",
+        "base_url": "override_base_url",
+        "api_mode": "override_api_mode",
+        "acp_command": "override_acp_command",
+        "acp_args": "override_acp_args",
+        "reasoning_effort": "reasoning_effort",
+        "clean_context": "clean_context",
+    }
+    for src, dst in _MAP.items():
+        if src in task and task[src] is not None:
+            out[dst] = task[src]
+    if "api_key_env" in task and task["api_key_env"]:
+        import os
+        val = os.environ.get(str(task["api_key_env"]))
+        if val:
+            out["override_api_key"] = val
+        else:
+            import logging
+            logging.getLogger("tools.delegate_tool").warning(
+                "task api_key_env=%r set but env var is empty", task["api_key_env"]
+            )
+    elif "api_key" in task and task["api_key"]:
+        out["override_api_key"] = task["api_key"]
+    return out
+
+
+"""delegate_task input validation: tasks=[...] / legacy goal normalisation, per-task output schemas and images."""
 
 import json
 import re
@@ -102,7 +151,20 @@ def _normalize_task_list(
             return None, f"Task {i} is missing a 'goal'."
     # The single-goal form is exempt from the batch gate (short goals are valid there).
     batch_error = _validate_batch_tasks(task_list) if isinstance(tasks, list) else None
-    return (None, batch_error) if batch_error else (task_list, None)
+    if batch_error:
+        return None, batch_error
+    # Per-task: count field expands a single template entry into N identical tasks (fleet shorthand).
+    expanded: List[Dict[str, Any]] = []
+    for task in task_list:
+        count = task.get("count") if isinstance(task, dict) else None
+        if isinstance(count, int) and count > 1:
+            # Each clone shares goal/context/template/overrides; only `count` is stripped.
+            base = {k: v for k, v in task.items() if k != "count"}
+            for _ in range(count):
+                expanded.append(dict(base))
+        else:
+            expanded.append(task)
+    return expanded, None
 
 def _coerce_task_schemas(
     task_list: List[Dict[str, Any]], output_schema: Optional[Dict[str, Any]]

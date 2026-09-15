@@ -1,6 +1,41 @@
-"""Delegation config knobs (delegation.* keys) and child credential/provider resolution."""
-
 from __future__ import annotations
+
+def _resolve_fleet_template(name: str) -> Optional[Dict[str, Any]]:
+    """Resolve a fleet template name from ``delegation.fleet.<name>`` in config.
+
+    Returns the template dict (provider/model/etc.) or None if not configured. Templates
+    let a user define a named bundle once and reference it from any task:
+
+        delegation:
+          fleet:
+            grok-reviewer:
+              provider: xai-oauth
+              model: grok-4-fast
+              reasoning_effort: medium
+              clean_context: true
+
+    Per-task fields always win over template fields. Templates never specify ``goal`` —
+    the task's goal is the work to do with the chosen tool.
+    """
+    if not name or not isinstance(name, str):
+        return None
+    try:
+        from hermes_cli.config import load_config_readonly
+        cfg = (load_config_readonly() or {}).get("delegation", {}) or {}
+    except Exception:
+        cfg = {}
+    if not isinstance(cfg, dict):
+        return None
+    fleet = cfg.get("fleet")
+    if not isinstance(fleet, dict):
+        return None
+    template = fleet.get(name)
+    if not isinstance(template, dict):
+        return None
+    return dict(template)
+
+
+"""Delegation config knobs (delegation.* keys) and child credential/provider resolution."""
 
 import logging
 import os
@@ -362,12 +397,15 @@ def _runtime_provider_credentials(v: dict, explicit_request_overrides) -> dict:
         command=pinned_command, args=list(runtime.get("args") or []),
     )
 
-def _resolve_delegation_credentials(cfg: dict, parent_agent) -> dict:
-    """Child credential bundle from the ``delegation`` config section. Three branches: ``base_url`` set → direct
-    endpoint (``api_key`` None means inherit the parent's key, so providers keyed outside OPENAI_API_KEY work);
-    ``provider`` set → full bundle via the runtime provider system (same path as CLI/gateway startup); neither →
-    None values, child inherits everything. ``request_overrides`` is honored on every branch. Raises ValueError
-    with a user-facing message."""
+def _resolve_delegation_credentials(cfg: dict, parent_agent, *, per_task_overrides: Optional[Dict[str, Any]] = None) -> dict:
+    """Child credential bundle. Three layers, highest priority first:
+      1. ``per_task_overrides`` (kwargs from a single task entry in ``tasks=[...]``)
+      2. ``cfg`` (the ``delegation`` config section: model/provider/base_url/api_key/api_mode)
+      3. parent inheritance (when both overrides and config are absent)
+
+    Within each layer, three branches: ``base_url`` set → direct endpoint; ``provider`` set → runtime provider
+    bundle; neither → pure inheritance. ``request_overrides`` is honored on every branch. Raises ValueError
+    with a user-facing message on misconfiguration."""
     values = {k: str(cfg.get(k) or "").strip() or None for k in ("model", "provider", "base_url", "api_key")}
     values["api_mode"] = str(cfg.get("api_mode") or "").strip().lower() or None
     explicit_request_overrides = cfg.get("request_overrides") if isinstance(cfg.get("request_overrides"), dict) else None
@@ -439,6 +477,7 @@ def _resolve_child_runtime(
     override_base_url: Optional[str], override_api_key: Optional[str], override_api_mode: Optional[str],
     override_acp_command: Optional[str], override_acp_args: Optional[List[str]],
     routing_cfg: Optional[Dict[str, Any]] = None,
+    override_reasoning_effort: Optional[Any] = None,
 ) -> Dict[str, Any]:
     """Child credentials, transport and routing (config override > parent inherit) as ``AIAgent`` kwargs. Rules that
     are easy to break: api_mode is re-derived (not inherited) when the child's provider differs from the parent's
@@ -491,10 +530,17 @@ def _resolve_child_runtime(
         # Forced ACP transport requires provider copilot-acp for run_agent to init the client.
         effective_provider, effective_api_mode = "copilot-acp", "chat_completions"
 
-    # Reasoning: delegation.reasoning_effort > parent. Keep the raw value — a
+    # Reasoning: per-task > delegation.reasoning_effort > parent. Keep the raw value — a
     # YAML ``false`` must disable thinking, not coerce to "" and inherit.
     child_reasoning = getattr(parent_agent, "reasoning_config", None)
     try:
+        if override_reasoning_effort is not None:
+            from hermes_constants import parse_reasoning_effort
+            parsed = parse_reasoning_effort(override_reasoning_effort)
+            if parsed is not None:
+                child_reasoning = parsed
+            else:
+                logger.warning("Unknown per-task reasoning_effort %r, falling back to delegation/parent", override_reasoning_effort)
         delegation_effort = delegation_cfg.get("reasoning_effort")
         if delegation_effort or delegation_effort is False:
             from hermes_constants import parse_reasoning_effort
