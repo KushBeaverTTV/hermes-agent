@@ -66,14 +66,19 @@ def _blocked_toolsets_for_role(role: str) -> List[str]:
     )
 
 def _resolve_child_toolsets(
-    parent_agent, toolsets: Optional[List[str]], effective_role: str
+    parent_agent, toolsets: Optional[List[str]], effective_role: str, clean_context: bool = False,
 ) -> tuple[List[str], List[str]]:
     """``(enabled_toolsets, disabled_toolsets)`` for a child. Children never gain tools the parent lacks: explicit
     ``toolsets`` are intersected with the parent's (composite-expanded) set, else the parent's enabled set is
     inherited. Blocked tools are stripped twice — whole blocked toolsets here, and exact one-tool deny toolsets via
     ``disabled_toolsets`` so blocked names inside mixed bundles (hermes-cli) are subtracted AFTER composite
     expansion and survive registry refreshes. Orchestrators get ``delegation`` re-added unconditionally
-    (role-granted, not inherited)."""
+    (role-granted, not inherited).
+
+    ``clean_context=True``: skip parent-toolset inheritance. The child gets ONLY the explicitly named
+    ``toolsets`` (or DEFAULT_TOOLSETS if none given); parent's MCP toolsets are not appended. Use for
+    adversarial reviews where parent-toolset inheritance would widen the surface beyond the task.
+    """
     # enabled_toolsets=None means "all tools", so derive from loaded tool names.
     parent_enabled = getattr(parent_agent, "enabled_toolsets", None)
     if parent_enabled is not None:
@@ -87,15 +92,23 @@ def _resolve_child_toolsets(
         parent_toolsets = set(DEFAULT_TOOLSETS)
 
     if toolsets:
-        expanded_parent = _expand_parent_toolsets(parent_toolsets)
-        child_toolsets = [t for t in toolsets if t in expanded_parent]
-        if _get_inherit_mcp_toolsets():
-            # Append any parent MCP toolsets missing from the narrowed child.
-            child_toolsets += [
-                name for name in sorted(parent_toolsets) if _is_mcp_toolset_name(name) and name not in child_toolsets
-            ]
-    elif parent_agent and parent_enabled is not None:
+        if clean_context:
+            # Clean-context: use the explicit list as-is, no parent intersection, no MCP inheritance.
+            child_toolsets = list(toolsets)
+        else:
+            expanded_parent = _expand_parent_toolsets(parent_toolsets)
+            child_toolsets = [t for t in toolsets if t in expanded_parent]
+            if _get_inherit_mcp_toolsets():
+                # Append any parent MCP toolsets missing from the narrowed child.
+                child_toolsets += [
+                    name for name in sorted(parent_toolsets) if _is_mcp_toolset_name(name) and name not in child_toolsets
+                ]
+    elif parent_agent and parent_enabled is not None and not clean_context:
         child_toolsets = parent_enabled
+    elif clean_context:
+        # Clean-context with no explicit toolsets: start from the conservative default core, NOT
+        # the parent's expanded set. This is the whole point — strip parent toolset inheritance.
+        child_toolsets = list(DEFAULT_TOOLSETS)
     else:
         child_toolsets = sorted(parent_toolsets) or DEFAULT_TOOLSETS
     child_toolsets = _strip_blocked_tools(child_toolsets)

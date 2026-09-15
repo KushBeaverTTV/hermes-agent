@@ -148,11 +148,15 @@ _NESTED_CHILDREN_NOTE = (
 
 def _build_child_system_prompt(
     goal: str, context: Optional[str] = None, *, workspace_path: Optional[str] = None, role: str = "leaf",
-    max_spawn_depth: int = 2, child_depth: int = 1,
+    max_spawn_depth: int = 2, child_depth: int = 1, clean_context: bool = False,
 ) -> str:
     """Focused system prompt for a child agent. role='orchestrator' appends a delegation-capability block (modeled on
     OpenClaw's buildSubagentSystemPrompt); its depth note is literal truth grounded in the passed config so the LLM
-    can't confabulate nesting."""
+    can't confabulate nesting.
+
+    ``clean_context=True``: skip the workspace context-files load (AGENTS.md, .cursorrules, etc.) so the child
+    operates without parent-project conventions bleeding in. Use for adversarial review.
+    """
     parts = ["You are a focused subagent working on a specific delegated task.", "", f"YOUR TASK:\n{goal}"]
     if context and context.strip():
         parts.append(f"\nCONTEXT:\n{context}")
@@ -167,11 +171,16 @@ def _build_child_system_prompt(
         # works in a repo blind to its conventions. SOUL.md is skipped (identity belongs to the parent).
         # workspace_path comes only from explicit sources (_resolve_workspace_hint, never bare getcwd), so the
         # install-tree-fallback leak doesn't apply. Best-effort.
+        #
+        # clean_context=True: SKIP the workspace context-files load entirely. Use for adversarial review where
+        # project conventions (AGENTS.md rules, .cursorrules) would taint the verdict. The child gets only its
+        # own focused goal+context system prompt, no project history.
         _ctx_files = ""
-        with _quiet("subagent: workspace context-files load failed", exc_info=True):
-            # See #64590.
-            from agent.prompt_builder import build_context_files_prompt
-            _ctx_files = build_context_files_prompt(cwd=str(workspace_path), skip_soul=True)
+        if not clean_context:
+            with _quiet("subagent: workspace context-files load failed", exc_info=True):
+                # See #64590.
+                from agent.prompt_builder import build_context_files_prompt
+                _ctx_files = build_context_files_prompt(cwd=str(workspace_path), skip_soul=True)
         if _ctx_files.strip():
             parts.append(_CONTEXT_FILES_INTRO + _ctx_files.strip())
     parts.append(_COMPLETION_INSTRUCTIONS)
