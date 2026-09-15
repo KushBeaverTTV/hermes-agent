@@ -22,6 +22,43 @@ DELEGATE_BLOCKED_TOOLS = frozenset(
 )
 DEFAULT_TOOLSETS = ["terminal", "file", "web"]
 
+
+def _resolve_default_toolsets(cfg: Optional[Dict[str, Any]] = None) -> List[str]:
+    """Return the conservative fallback toolset for clean-context children.
+
+    Order of precedence:
+      1. ``delegation.default_toolsets`` in config (per-deployment override)
+      2. ``DEFAULT_TOOLSETS`` module constant (the safe default)
+
+    Config is read fresh per call so live ``hermes config set`` updates apply
+    without a process restart. Bad values (non-list, contains blocked names)
+    fall back to DEFAULT_TOOLSETS with a warning.
+    """
+    base = list(DEFAULT_TOOLSETS)
+    try:
+        from hermes_cli.config import load_config_readonly
+        cfg = load_config_readonly() if cfg is None else cfg
+    except Exception:
+        return base
+    if not isinstance(cfg, dict):
+        return base
+    delegation = cfg.get("delegation")
+    if not isinstance(delegation, dict):
+        return base
+    configured = delegation.get("default_toolsets")
+    if isinstance(configured, list) and configured:
+        # Drop blocked names so a misconfigured override can't widen the surface.
+        blocked = set(DELEGATE_BLOCKED_TOOLS) | {"delegation", "kanban"}
+        cleaned = [t for t in configured if isinstance(t, str) and t not in blocked]
+        if cleaned:
+            return cleaned
+        import logging
+        logging.getLogger("tools.delegate_tool").warning(
+            "delegation.default_toolsets had no usable entries; falling back to DEFAULT_TOOLSETS"
+        )
+    return base
+
+
 def _is_mcp_toolset_name(name: str) -> bool:
     """Return True for canonical MCP toolsets and their registered aliases."""
     if not name:
@@ -106,11 +143,12 @@ def _resolve_child_toolsets(
     elif parent_agent and parent_enabled is not None and not clean_context:
         child_toolsets = parent_enabled
     elif clean_context:
-        # Clean-context with no explicit toolsets: start from the conservative default core, NOT
-        # the parent's expanded set. This is the whole point — strip parent toolset inheritance.
-        child_toolsets = list(DEFAULT_TOOLSETS)
+        # Clean-context with no explicit toolsets: start from the configurable default
+        # core (delegation.default_toolsets in config, falling back to DEFAULT_TOOLSETS),
+        # NOT the parent's expanded set. This is the whole point — strip parent toolset inheritance.
+        child_toolsets = _resolve_default_toolsets()
     else:
-        child_toolsets = sorted(parent_toolsets) or DEFAULT_TOOLSETS
+        child_toolsets = sorted(parent_toolsets) or _resolve_default_toolsets()
     child_toolsets = _strip_blocked_tools(child_toolsets)
 
     raw_parent_disabled = getattr(parent_agent, "disabled_toolsets", None)

@@ -177,12 +177,79 @@ def test_task_mix_and_match():
     print("PASS  end-to-end mix-and-match task list shape works")
 
 
+def test_resolve_default_toolsets():
+    """Verify _resolve_default_toolsets honors delegation.default_toolsets override.
+
+    Without config: returns the module DEFAULT_TOOLSETS constant.
+    With config override: returns the configured list (minus blocked names).
+    With bad config (non-list, only blocked names): falls back with warning.
+    """
+    from tools.delegate_tool_toolsets import (
+        _resolve_default_toolsets, DEFAULT_TOOLSETS, DELEGATE_BLOCKED_TOOLS,
+    )
+    # 1. No config -> module constant.
+    base = _resolve_default_toolsets(cfg={})
+    assert base == list(DEFAULT_TOOLSETS), f"empty config should return DEFAULT_TOOLSETS, got {base}"
+    print(f"PASS  empty config -> DEFAULT_TOOLSETS ({base})")
+
+    # 2. Configured override -> used as-is (minus blocked).
+    configured = ["terminal", "file", "search", "skills"]
+    got = _resolve_default_toolsets(cfg={"delegation": {"default_toolsets": configured}})
+    assert got == configured, f"configured default_toolsets not honored: got {got}"
+    print(f"PASS  delegation.default_toolsets override applied: {got}")
+
+    # 3. Blocked names are stripped from override (defensive).
+    blocked_in_overset = ["terminal", "memory", "delegate_task", "send_message"]
+    got = _resolve_default_toolsets(cfg={"delegation": {"default_toolsets": blocked_in_overset}})
+    assert "memory" not in got
+    assert "delegate_task" not in got
+    assert "send_message" not in got
+    assert "terminal" in got
+    print(f"PASS  blocked names stripped from override: {got}")
+
+    # 4. All-blocked config falls back to DEFAULT_TOOLSETS with a warning.
+    all_blocked = list(DELEGATE_BLOCKED_TOOLS)
+    got = _resolve_default_toolsets(cfg={"delegation": {"default_toolsets": all_blocked}})
+    assert got == list(DEFAULT_TOOLSETS), (
+        f"all-blocked config should fall back to DEFAULT_TOOLSETS, got {got}"
+    )
+    print(f"PASS  all-blocked config falls back to DEFAULT_TOOLSETS")
+
+    # 5. Non-list config value falls back.
+    got = _resolve_default_toolsets(cfg={"delegation": {"default_toolsets": "not-a-list"}})
+    assert got == list(DEFAULT_TOOLSETS), f"non-list config should fall back, got {got}"
+    print(f"PASS  non-list config value falls back to DEFAULT_TOOLSETS")
+
+    # 6. Clean-context path uses _resolve_default_toolsets (not hardcoded DEFAULT_TOOLSETS).
+    # We verify by mocking load_config_readonly to return a custom override.
+    from tools import delegate_tool_toolsets as ts_mod
+    real_default_resolver = ts_mod._resolve_default_toolsets
+    def fake_resolver(cfg=None):
+        return ["terminal", "search"]
+    ts_mod._resolve_default_toolsets = fake_resolver
+    try:
+        parent = types.SimpleNamespace()
+        parent.enabled_toolsets = {"web", "mcp-filesystem", "delegation", "hermes-cli"}
+        parent.disabled_toolsets = []
+        enabled, disabled = ts_mod._resolve_child_toolsets(
+            parent, toolsets=None, effective_role="leaf", clean_context=True
+        )
+        # Should be our mocked ["terminal", "search"], not the default ["terminal", "file", "web"].
+        assert enabled == ["terminal", "search"], (
+            f"clean_context path should use _resolve_default_toolsets, got {enabled}"
+        )
+    finally:
+        ts_mod._resolve_default_toolsets = real_default_resolver
+    print(f"PASS  clean_context path uses configurable default toolsets")
+
+
 if __name__ == "__main__":
     test_extract_overrides()
     test_count_expansion()
     test_fleet_template_resolution()
     test_reasoning_override()
     test_task_mix_and_match()
+    test_resolve_default_toolsets()
     print("\nAll fleet-mode tests pass.")
 
 # =============================================================================
