@@ -112,7 +112,22 @@ def _smart_approve(command: str, description: str) -> str:
         )
         logger.debug("Smart approvals: LLM call completed in %.1fs", time.monotonic() - _smart_t0)
         answer = (response.choices[0].message.content or "").strip().upper()
-        return _VERDICTS.get(answer, "escalate")
+        if answer in _VERDICTS or answer == "ESCALATE":
+            return _VERDICTS.get(answer, "escalate")
+        # Reasoning-style auxiliary models (e.g. MiniMax-M3) emit chain-of-thought
+        # before the one-word verdict. Accept the verdict as the FINAL token only —
+        # a verdict word appearing mid-reasoning ("...not DENY because...") must
+        # never match, and a negated ending escalates rather than approving.
+        tokens = answer.split()
+        if tokens:
+            last = tokens[-1].strip(".,!?;:'\"")
+            if last in _VERDICTS or last == "ESCALATE":
+                negated = any(
+                    answer.rstrip(".,!?;:'\" ").endswith(n)
+                    for n in ("NOT APPROVE", "CANNOT APPROVE", "N'T APPROVE", "DON'T APPROVE")
+                )
+                return "escalate" if negated else _VERDICTS.get(last, "escalate")
+        return "escalate"
     except Exception as e:
         # WARNING, not DEBUG: a failed/blocked guardian call is a real event
         # the operator needs to see (the hang was invisible at DEBUG).
