@@ -827,7 +827,7 @@ def _lap_overlay_rows(b: _PickerBuild, data: dict) -> None:
             continue
         if not _overlay_has_creds(b, pid, hermes_slug, overlay):
             continue
-        if hermes_slug in {"openai-codex", "copilot", "copilot-acp"}:
+        if hermes_slug in {"openai-codex", "copilot", "copilot-acp", "devin"}:
             # Live OAuth-backed discovery so Pro-only Codex slugs not in the static catalog
             # appear; falls back to curated when unreachable.
             from hermes_cli.models import cached_provider_model_ids

@@ -226,6 +226,13 @@ export const PROVIDER_GROUPS: ProviderPrefix[] = [
     description: 'Authenticate via AWS profile + region',
     docsUrl: 'https://docs.aws.amazon.com/bedrock/latest/userguide/bedrock-regions.html',
     priority: 23
+  },
+  {
+    prefix: 'DEVIN_',
+    name: 'Devin',
+    description: 'Devin AI coding agent via local ACP subprocess (SWE-2, Claude Opus 5, Kimi K3, GLM 5.3, etc.)',
+    docsUrl: 'https://devin.ai',
+    priority: 24
   }
 ]
 

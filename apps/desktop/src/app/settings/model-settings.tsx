@@ -865,7 +865,7 @@ export function ModelSettings({ onMainModelChanged, scopeProfile }: ModelSetting
             <SelectContent>
               {mainProviderOptions.map(provider => (
                 <SelectItem key={provider.slug || 'none'} value={provider.slug || 'none'}>
-                  {provider.name}
+                  {provider.name || provider.slug}
                 </SelectItem>
               ))}
             </SelectContent>

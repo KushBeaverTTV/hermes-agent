@@ -188,6 +188,9 @@ _REGISTRY_ROWS: Tuple[Any, ...] = (
     ProviderConfig(
         "copilot-acp", "GitHub Copilot ACP", "external_process",
         inference_base_url=DEFAULT_COPILOT_ACP_BASE_URL, base_url_env_var="COPILOT_ACP_BASE_URL"),
+    ProviderConfig(
+        "devin", "Devin", "external_process",
+        inference_base_url="acp://devin", base_url_env_var="DEVIN_ACP_BASE_URL"),
     ("gemini", "Google AI Studio", "https://generativelanguage.googleapis.com/v1beta",
      ("GOOGLE_API_KEY", "GEMINI_API_KEY"), "GEMINI_BASE_URL"),
     ("zai", "Z.AI / GLM", "https://api.z.ai/api/paas/v4",
@@ -1884,6 +1887,13 @@ def _external_process_auth_evidence(provider_id: str) -> tuple[bool, Optional[st
     False means "not verifiable from here", NOT "signed out" (the Copilot CLI may use an OS keychain
     Hermes can't read). Deliberately subprocess-free: spawning ``gh auth token`` from status
     endpoints/pickers re-creates the cold-start stall copilot_auth.py avoids."""
+    if provider_id == "devin":
+        cred_path = os.path.expanduser(r"~\AppData\Roaming\devin\credentials.toml")
+        if os.path.isfile(cred_path) and os.path.getsize(cred_path) > 10:
+            return True, cred_path
+        if shutil.which("devin"):
+            return True, "devin CLI"
+        return False, None
     if provider_id != "copilot-acp":
         return False, None
     # 1. Supported env tokens — the same vars the Copilot CLI itself honors.

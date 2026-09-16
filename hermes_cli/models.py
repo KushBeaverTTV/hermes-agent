@@ -1452,7 +1452,14 @@ def _profile_live_catalog(normalized: str) -> Optional[list[str]]:
     from providers import get_provider_profile
 
     profile = get_provider_profile(normalized)
-    if not (profile and profile.auth_type == "api_key" and profile.base_url):
+    if not profile or not profile.base_url:
+        return None
+    if profile.auth_type == "external_process":
+        live = profile.fetch_models()
+        if live:
+            return live
+        return list(profile.fallback_models) if profile.fallback_models else None
+    if profile.auth_type != "api_key":
         return None
     api_key, base_url = _api_key_credentials(normalized)
     live = profile.fetch_models(api_key=api_key, base_url=base_url or profile.base_url or None) if api_key else None
