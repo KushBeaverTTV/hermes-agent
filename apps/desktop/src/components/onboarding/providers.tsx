@@ -12,8 +12,8 @@ const PROVIDER_DISPLAY: Record<string, { order: number; title: string }> = {
   // Both Anthropic entries sit at the bottom: the API-key path first, then
   // the subscription OAuth path (only works with extra usage credits).
   anthropic: { order: 5, title: 'Anthropic API Key' },
-  "copilot-acp": { order: 6, title: "GitHub Copilot ACP" },
-  devin: { order: 7, title: "Devin" },
+  'copilot-acp': { order: 6, title: 'GitHub Copilot ACP' },
+  devin: { order: 7, title: 'Devin' }
 }
 
 const assetPath = (path: string) => `${import.meta.env.BASE_URL}${path.replace(/^\/+/, '')}`
