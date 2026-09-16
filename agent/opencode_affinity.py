@@ -21,6 +21,27 @@ from typing import Any, Optional
 
 OPENCODE_SESSION_HEADER = "x-opencode-session"
 
+_PROCESS_SESSION_KEY: Optional[str] = None
+
+
+def _process_stable_session_key() -> str:
+    """Stable per-process fallback for calls with no conversation scope.
+
+    OpenCode's relay now REJECTS headerless requests (400 MissingSessionID —
+    "cannot be routed efficiently"). Bare CLI/cron contexts (aux approval,
+    one-shot calls) have no ambient conversation, affinity scope, or runtime
+    main, so scope resolution legitimately comes up empty. The value only has
+    to be opaque and consistent; a per-process id keeps those calls routable
+    while staying stable enough to keep the relay's cache warm within the
+    process. (#repro: aux call_llm to opencode-go with devin main → 400.)
+    """
+    global _PROCESS_SESSION_KEY
+    if _PROCESS_SESSION_KEY is None:
+        import uuid
+
+        _PROCESS_SESSION_KEY = f"hermes-aux-{uuid.uuid4()}"
+    return _PROCESS_SESSION_KEY
+
 
 def is_opencode_target(provider: Optional[str], base_url: Optional[str]) -> bool:
     """True when *provider* or *base_url* addresses the OpenCode relay.
@@ -72,7 +93,11 @@ def opencode_session_headers(
         )
     except Exception:
         key = str(session_id or "")
-    return {OPENCODE_SESSION_HEADER: key} if key else {}
+    if not key:
+        # Never omit the header: OpenCode's relay rejects headerless requests
+        # (400 MissingSessionID). See _process_stable_session_key.
+        key = _process_stable_session_key()
+    return {OPENCODE_SESSION_HEADER: key}
 
 
 def merge_opencode_session_headers(
