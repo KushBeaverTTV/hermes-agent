@@ -58,22 +58,48 @@ class TestContextCacheGuard:
 
 
 class TestSelectionContextForAgent:
-    def test_measured_tokens_then_session_counter_fallback(self):
+    def test_measured_occupancy_wins(self):
         class _CC:
             last_prompt_tokens = 123_456
 
         class _Measured:
             context_compressor = _CC()
-            model = "current/model"
-
-        class _Fallback:
-            context_compressor = None
-            session_prompt_tokens = 42_000
+            session_prompt_tokens = 82_000_000
             model = "current/model"
 
         ctx = selection_context_for_agent(_Measured())
         assert (ctx.context_tokens, ctx.current_model) == (123_456, "current/model")
-        assert selection_context_for_agent(_Fallback()).context_tokens == 42_000
+
+    def test_lifetime_session_counter_is_not_occupancy(self):
+        class _Fallback:
+            context_compressor = None
+            session_prompt_tokens = 82_000_000
+            model = "current/model"
+
+        assert selection_context_for_agent(_Fallback()) is None
+
+    def test_compression_sentinel_does_not_use_lifetime_sum(self):
+        class _CC:
+            last_prompt_tokens = -1
+            last_real_prompt_tokens = 307_588
+
+        class _Agent:
+            context_compressor = _CC()
+            session_prompt_tokens = 59_000_000
+            model = "current/model"
+
+        ctx = selection_context_for_agent(_Agent())
+        assert ctx.context_tokens == 307_588
+
+    def test_usage_anchor_when_compressor_empty(self):
+        class _Agent:
+            context_compressor = None
+            session_prompt_tokens = 59_000_000
+            _usage_anchor = {"prompt_tokens": 308_000}
+            model = "current/model"
+
+        ctx = selection_context_for_agent(_Agent())
+        assert ctx.context_tokens == 308_000
 
     def test_no_agent_or_empty_session_returns_none(self):
         class _Empty:

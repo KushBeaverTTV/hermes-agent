@@ -34,17 +34,45 @@ class SelectionContext:
     current_model: Optional[str] = None
 
 
+def _positive_int(value: object) -> int:
+    try:
+        tokens = int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+    return tokens if tokens > 0 else 0
+
+
+def _occupancy_tokens(agent: object) -> int:
+    """Latest-turn occupancy only. Never ``session_prompt_tokens``.
+
+    ``session_prompt_tokens`` is a lifetime sum of ``input + cache_read + cache_write``
+    across every API call. On long tool-loop chats that is tens of millions and is
+    not the size of the window a model switch would re-read. ``last_prompt_tokens``
+    can be ``-1`` (compression sentinel) or ``0`` (no usage this process) — those
+    must not fall through to the lifetime counter.
+    """
+    cc = getattr(agent, "context_compressor", None)
+    for attr in ("last_prompt_tokens", "last_real_prompt_tokens"):
+        n = _positive_int(getattr(cc, attr, 0) if cc is not None else 0)
+        if n:
+            return n
+    for attr in ("_turn_base_usage_anchor", "_usage_anchor"):
+        anchor = getattr(agent, attr, None)
+        if isinstance(anchor, dict):
+            n = _positive_int(anchor.get("prompt_tokens"))
+            if n:
+                return n
+    return 0
+
+
 def selection_context_for_agent(agent: object) -> Optional[SelectionContext]:
-    """:class:`SelectionContext` from a live ``AIAgent``: the compressor's measured
-    ``last_prompt_tokens`` (what the provider billed on the latest turn), else the session prompt
-    counter. ``None`` when no live size is known — the guard then stays silent rather than guess."""
+    """:class:`SelectionContext` from a live ``AIAgent``: occupancy of the latest
+    priced turn. ``None`` when no occupancy is known — the guard stays silent
+    rather than guess from lifetime throughput."""
     if agent is None:
         return None
     try:
-        cc = getattr(agent, "context_compressor", None)
-        tokens = int(getattr(cc, "last_prompt_tokens", 0) or 0) if cc else 0
-        if tokens <= 0:
-            tokens = int(getattr(agent, "session_prompt_tokens", 0) or 0)
+        tokens = _occupancy_tokens(agent)
     except Exception:
         tokens = 0
     if tokens <= 0:
